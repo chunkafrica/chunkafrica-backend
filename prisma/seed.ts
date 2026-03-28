@@ -12,7 +12,12 @@ async function main() {
     // Create or update business
     const business = await prisma.business.upsert({
       where: { id: businessId },
-      update: {},
+      update: {
+        name: 'Dev Business',
+        currencyCode: 'NGN',
+        timezone: 'Africa/Lagos',
+        deletedAt: null,
+      },
       create: {
         id: businessId,
         name: 'Dev Business',
@@ -30,7 +35,11 @@ async function main() {
           name: 'admin',
         },
       },
-      update: {},
+      update: {
+        description: 'Administrator role for local development',
+        isSystemRole: true,
+        deletedAt: null,
+      },
       create: {
         id: roleId,
         businessId,
@@ -44,7 +53,13 @@ async function main() {
     // Create or update store
     const store = await prisma.store.upsert({
       where: { id: storeId },
-      update: {},
+      update: {
+        businessId,
+        name: 'Dev Store',
+        storeType: 'PHYSICAL',
+        isActive: true,
+        deletedAt: null,
+      },
       create: {
         id: storeId,
         businessId,
@@ -57,12 +72,20 @@ async function main() {
     // Create or update user
     const user = await prisma.user.upsert({
       where: { id: userId },
-      update: {},
+      update: {
+        businessId,
+        roleId: role.id,
+        primaryStoreId: store.id,
+        fullName: 'Dev User',
+        email: 'dev@localhost',
+        isActive: true,
+        deletedAt: null,
+      },
       create: {
         id: userId,
         businessId,
-        roleId,
-        primaryStoreId: storeId,
+        roleId: role.id,
+        primaryStoreId: store.id,
         fullName: 'Dev User',
         email: 'dev@localhost',
       },
