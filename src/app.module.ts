@@ -4,6 +4,7 @@ import { AuthModule } from './common/auth/auth.module';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { StoresController } from './common/stores/stores.controller';
 import { StoresService } from './common/stores/stores.service';
+import { HealthController } from './health.controller';
 import { InventoryModule } from './modules/inventory/inventory.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { ProductionBatchesModule } from './modules/production-batches/production-batches.module';
@@ -15,7 +16,7 @@ import { SuppliersModule } from './modules/suppliers/suppliers.module';
 import { WasteModule } from './modules/waste/waste.module';
 
 @Module({
-  controllers: [StoresController],
+  controllers: [HealthController, StoresController],
   providers: [StoresService],
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
