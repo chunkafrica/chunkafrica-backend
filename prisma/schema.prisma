@@ -1,0 +1,695 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum StoreType {
+  PHYSICAL
+  ONLINE
+}
+
+enum InventoryItemType {
+  RAW_MATERIAL
+  FINISHED_GOOD
+  PACKAGING
+}
+
+enum StockMovementType {
+  STOCK_IN
+  PRODUCTION_USE
+  PRODUCTION_OUTPUT
+  WASTE
+  INVENTORY_ADJUSTMENT
+  SALE
+}
+
+enum SalesChannel {
+  WALK_IN
+  WHATSAPP
+  INSTAGRAM
+  WEBSITE
+  CHOWDECK
+  GLOVO
+  EVENT
+}
+
+enum SalesOrderStatus {
+  NEW
+  PREPARING
+  READY_FOR_DELIVERY
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+  REFUNDED
+}
+
+enum ProductionBatchStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum ReconciliationStatus {
+  DRAFT
+  POSTED
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  VOID
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  CARD
+  TRANSFER
+  OTHER
+}
+
+model Business {
+  id            String   @id @default(uuid()) @db.Uuid
+  name          String
+  legalName     String?
+  email         String?
+  phone         String?
+  currencyCode  String   @default("NGN") @db.VarChar(3)
+  timezone      String   @default("Africa/Lagos")
+  address       String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  deletedAt     DateTime?
+
+  stores                   Store[]
+  users                    User[]
+  roles                    Role[]
+  suppliers                Supplier[]
+  inventoryItems           InventoryItem[]
+  menuItems                MenuItem[]
+  recipes                  Recipe[]
+  wasteCategories          WasteCategory[]
+  customers                Customer[]
+  stockInRecords           StockInRecord[]
+  productionBatches        ProductionBatch[]
+  wasteLogs                WasteLog[]
+  salesOrders              SalesOrder[]
+  invoices                 Invoice[]
+  receipts                 Receipt[]
+  expenses                 Expense[]
+  inventoryReconciliations InventoryReconciliation[]
+  stockMovements           StockMovement[]
+
+  @@index([deletedAt])
+}
+
+model Store {
+  id         String    @id @default(uuid()) @db.Uuid
+  businessId String    @db.Uuid
+  name       String
+  code       String?
+  storeType  StoreType
+  email      String?
+  phone      String?
+  address    String?
+  isActive   Boolean   @default(true)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  deletedAt  DateTime?
+
+  business                 Business                 @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  primaryUsers             User[]                   @relation("UserPrimaryStore")
+  stockInRecords           StockInRecord[]
+  productionBatches        ProductionBatch[]
+  wasteLogs                WasteLog[]
+  salesOrders              SalesOrder[]
+  invoices                 Invoice[]
+  receipts                 Receipt[]
+  expenses                 Expense[]
+  inventoryReconciliations InventoryReconciliation[]
+  stockMovements           StockMovement[]
+
+  @@unique([businessId, name])
+  @@index([businessId, storeType])
+  @@index([businessId, deletedAt])
+}
+
+model Role {
+  id           String   @id @default(uuid()) @db.Uuid
+  businessId   String   @db.Uuid
+  name         String
+  description  String?  @db.Text
+  isSystemRole Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  deletedAt    DateTime?
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  users    User[]
+
+  @@unique([businessId, name])
+  @@index([businessId, deletedAt])
+}
+
+model User {
+  id             String    @id @default(uuid()) @db.Uuid
+  businessId     String    @db.Uuid
+  roleId         String    @db.Uuid
+  primaryStoreId String?   @db.Uuid
+  fullName       String
+  email          String
+  phone          String?
+  passwordHash   String?
+  isActive       Boolean   @default(true)
+  lastLoginAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  business                        Business                  @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  role                            Role                      @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  primaryStore                    Store?                    @relation("UserPrimaryStore", fields: [primaryStoreId], references: [id], onDelete: SetNull)
+  stockInRecordsCreated           StockInRecord[]           @relation("StockInRecordCreatedBy")
+  productionBatchesCreated        ProductionBatch[]         @relation("ProductionBatchCreatedBy")
+  wasteLogsCreated                WasteLog[]                @relation("WasteLogCreatedBy")
+  salesOrdersCreated              SalesOrder[]              @relation("SalesOrderCreatedBy")
+  invoicesCreated                 Invoice[]                 @relation("InvoiceCreatedBy")
+  receiptsCreated                 Receipt[]                 @relation("ReceiptCreatedBy")
+  expensesCreated                 Expense[]                 @relation("ExpenseCreatedBy")
+  inventoryReconciliationsCreated InventoryReconciliation[] @relation("InventoryReconciliationCreatedBy")
+  stockMovementsCreated           StockMovement[]           @relation("StockMovementCreatedBy")
+
+  @@unique([businessId, email])
+  @@index([businessId, roleId])
+  @@index([primaryStoreId])
+  @@index([businessId, deletedAt])
+}
+
+model Supplier {
+  id          String   @id @default(uuid()) @db.Uuid
+  businessId  String   @db.Uuid
+  name        String
+  contactName String?
+  email       String?
+  phone       String?
+  address     String?
+  notes       String?  @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  deletedAt   DateTime?
+
+  business       Business       @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  stockInRecords StockInRecord[]
+  expenses       Expense[]
+
+  @@unique([businessId, name])
+  @@index([businessId, deletedAt])
+}
+
+/// On-hand inventory is derived from StockMovement grouped by storeId + inventoryItemId.
+model InventoryItem {
+  id                       String            @id @default(uuid()) @db.Uuid
+  businessId               String            @db.Uuid
+  name                     String
+  sku                      String?
+  description              String?           @db.Text
+  itemType                 InventoryItemType
+  unitOfMeasure            String
+  defaultCostPerUnit       Decimal?          @db.Decimal(18,4)
+  defaultSellingPrice      Decimal?          @db.Decimal(18,4)
+  restockPoint             Decimal?          @db.Decimal(18,4)
+  isActive                 Boolean           @default(true)
+  trackExpiry              Boolean           @default(false)
+  createdAt                DateTime          @default(now())
+  updatedAt                DateTime          @updatedAt
+  deletedAt                DateTime?
+
+  business                 Business                    @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  stockInItems             StockInItem[]
+  stockMovements           StockMovement[]
+  recipeIngredients        RecipeItem[]                @relation("RecipeIngredientInventoryItem")
+  recipeOutputs            Recipe[]                    @relation("RecipeOutputInventoryItem")
+  productionBatchIngredients ProductionBatchIngredient[] @relation("ProductionBatchIngredientInventoryItem")
+  producedBatches          ProductionBatch[]           @relation("ProductionBatchOutputInventoryItem")
+  wasteLogs                WasteLog[]
+  salesOrderItems          SalesOrderItem[]            @relation("SalesOrderItemFulfilledInventoryItem")
+  reconciliationItems      ReconciliationItem[]
+
+  @@index([businessId, name])
+  @@index([businessId, itemType])
+  @@index([businessId, deletedAt])
+}
+
+model MenuItem {
+  id           String   @id @default(uuid()) @db.Uuid
+  businessId   String   @db.Uuid
+  name         String
+  description  String?  @db.Text
+  defaultPrice Decimal  @db.Decimal(18,4)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  deletedAt    DateTime?
+
+  business          Business          @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  recipes           Recipe[]
+  salesOrderItems   SalesOrderItem[]
+  productionBatches ProductionBatch[]
+
+  @@unique([businessId, name])
+  @@index([businessId, deletedAt])
+}
+
+model Recipe {
+  id                      String   @id @default(uuid()) @db.Uuid
+  businessId              String   @db.Uuid
+  menuItemId              String   @db.Uuid
+  producedInventoryItemId String   @db.Uuid
+  version                 Int
+  yieldQuantity           Decimal  @db.Decimal(18,4)
+  isActive                Boolean  @default(true)
+  instructions            String?  @db.Text
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+  deletedAt               DateTime?
+
+  /// Recipes are versioned snapshots. Create a new row instead of mutating a recipe that has been used.
+  business              Business      @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  menuItem              MenuItem      @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
+  producedInventoryItem InventoryItem @relation("RecipeOutputInventoryItem", fields: [producedInventoryItemId], references: [id], onDelete: Restrict)
+  recipeItems           RecipeItem[]
+  productionBatches     ProductionBatch[]
+
+  @@unique([menuItemId, version])
+  @@index([businessId, menuItemId])
+  @@index([producedInventoryItemId])
+  @@index([businessId, deletedAt])
+}
+
+model RecipeItem {
+  id               String   @id @default(uuid()) @db.Uuid
+  recipeId         String   @db.Uuid
+  inventoryItemId  String   @db.Uuid
+  quantityRequired Decimal  @db.Decimal(18,4)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  recipe        Recipe        @relation(fields: [recipeId], references: [id], onDelete: Restrict)
+  inventoryItem InventoryItem @relation("RecipeIngredientInventoryItem", fields: [inventoryItemId], references: [id], onDelete: Restrict)
+
+  @@unique([recipeId, inventoryItemId])
+  @@index([inventoryItemId])
+}
+
+model StockInRecord {
+  id                String   @id @default(uuid()) @db.Uuid
+  businessId        String   @db.Uuid
+  storeId           String   @db.Uuid
+  supplierId        String?  @db.Uuid
+  createdByUserId   String   @db.Uuid
+  receivedAt        DateTime
+  externalReference String?
+  notes             String?  @db.Text
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  business      Business      @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  store         Store         @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  supplier      Supplier?     @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  createdByUser User          @relation("StockInRecordCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  items         StockInItem[]
+
+  @@index([businessId, storeId, receivedAt])
+  @@index([supplierId])
+  @@index([createdByUserId])
+}
+
+model StockInItem {
+  id              String   @id @default(uuid()) @db.Uuid
+  stockInRecordId String   @db.Uuid
+  inventoryItemId String   @db.Uuid
+  quantity        Decimal  @db.Decimal(18,4)
+  unitCost        Decimal  @db.Decimal(18,4)
+  totalCost       Decimal  @db.Decimal(18,4)
+  expiryDate      DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  stockInRecord StockInRecord  @relation(fields: [stockInRecordId], references: [id], onDelete: Restrict)
+  inventoryItem InventoryItem  @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+  stockMovement StockMovement? @relation("StockInItemMovement")
+
+  @@index([stockInRecordId])
+  @@index([inventoryItemId])
+  @@index([expiryDate])
+}
+
+model ProductionBatch {
+  id                      String                @id @default(uuid()) @db.Uuid
+  businessId              String                @db.Uuid
+  storeId                 String                @db.Uuid
+  menuItemId              String                @db.Uuid
+  recipeId                String                @db.Uuid
+  producedInventoryItemId String                @db.Uuid
+  createdByUserId         String                @db.Uuid
+  batchNumber             String?
+  recipeVersionUsed       Int
+  batchDate               DateTime
+  plannedOutputQuantity   Decimal?              @db.Decimal(18,4)
+  actualOutputQuantity    Decimal               @db.Decimal(18,4)
+  status                  ProductionBatchStatus @default(PLANNED)
+  notes                   String?               @db.Text
+  createdAt               DateTime              @default(now())
+  updatedAt               DateTime              @updatedAt
+
+  business              Business                    @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  store                 Store                       @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  menuItem              MenuItem                    @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
+  recipe                Recipe                      @relation(fields: [recipeId], references: [id], onDelete: Restrict)
+  producedInventoryItem InventoryItem               @relation("ProductionBatchOutputInventoryItem", fields: [producedInventoryItemId], references: [id], onDelete: Restrict)
+  createdByUser         User                        @relation("ProductionBatchCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  ingredients           ProductionBatchIngredient[]
+  outputStockMovement   StockMovement?              @relation("ProductionBatchOutputMovement")
+
+  @@index([businessId, storeId, batchDate])
+  @@index([recipeId])
+  @@index([createdByUserId])
+  @@index([status])
+  @@index([businessId, batchNumber])
+}
+
+model ProductionBatchIngredient {
+  id                String   @id @default(uuid()) @db.Uuid
+  productionBatchId String   @db.Uuid
+  inventoryItemId   String   @db.Uuid
+  expectedQuantity  Decimal  @db.Decimal(18,4)
+  actualQuantity    Decimal  @db.Decimal(18,4)
+  varianceQuantity  Decimal  @db.Decimal(18,4)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  productionBatch ProductionBatch @relation(fields: [productionBatchId], references: [id], onDelete: Restrict)
+  inventoryItem   InventoryItem   @relation("ProductionBatchIngredientInventoryItem", fields: [inventoryItemId], references: [id], onDelete: Restrict)
+  stockMovement   StockMovement?  @relation("ProductionUseMovement")
+
+  @@unique([productionBatchId, inventoryItemId])
+  @@index([inventoryItemId])
+}
+
+model WasteCategory {
+  id          String   @id @default(uuid()) @db.Uuid
+  businessId  String   @db.Uuid
+  name        String
+  description String?  @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  deletedAt   DateTime?
+
+  business  Business   @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  wasteLogs WasteLog[]
+
+  @@unique([businessId, name])
+  @@index([businessId, deletedAt])
+}
+
+model WasteLog {
+  id                 String   @id @default(uuid()) @db.Uuid
+  businessId         String   @db.Uuid
+  storeId            String   @db.Uuid
+  inventoryItemId    String   @db.Uuid
+  wasteCategoryId    String   @db.Uuid
+  createdByUserId    String   @db.Uuid
+  quantity           Decimal  @db.Decimal(18,4)
+  occurredAt         DateTime
+  note               String?  @db.Text
+  costAtLossSnapshot Decimal? @db.Decimal(18,4)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  business      Business       @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  store         Store          @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  inventoryItem InventoryItem  @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+  wasteCategory WasteCategory  @relation(fields: [wasteCategoryId], references: [id], onDelete: Restrict)
+  createdByUser User           @relation("WasteLogCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  stockMovement StockMovement? @relation("WasteLogMovement")
+
+  @@index([businessId, storeId, occurredAt])
+  @@index([inventoryItemId])
+  @@index([wasteCategoryId])
+  @@index([createdByUserId])
+}
+
+model Customer {
+  id         String   @id @default(uuid()) @db.Uuid
+  businessId String   @db.Uuid
+  name       String
+  email      String?
+  phone      String?
+  address    String?
+  notes      String?  @db.Text
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  deletedAt  DateTime?
+
+  business    Business    @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  salesOrders SalesOrder[]
+
+  @@index([businessId, name])
+  @@index([businessId, phone])
+  @@index([businessId, deletedAt])
+}
+
+model SalesOrder {
+  id              String           @id @default(uuid()) @db.Uuid
+  businessId      String           @db.Uuid
+  storeId         String           @db.Uuid
+  customerId      String?          @db.Uuid
+  createdByUserId String           @db.Uuid
+  orderNumber     String
+  channel         SalesChannel
+  orderStatus     SalesOrderStatus @default(NEW)
+  paymentStatus   PaymentStatus    @default(UNPAID)
+  orderedAt       DateTime
+  subtotal        Decimal          @db.Decimal(18,4)
+  discount        Decimal          @db.Decimal(18,4)
+  tax             Decimal          @db.Decimal(18,4)
+  total           Decimal          @db.Decimal(18,4)
+  notes           String?          @db.Text
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  business      Business         @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  store         Store            @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  customer      Customer?        @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  createdByUser User             @relation("SalesOrderCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  items         SalesOrderItem[]
+  invoice       Invoice?
+  receipts      Receipt[]
+
+  @@unique([businessId, orderNumber])
+  @@index([businessId, storeId, orderedAt])
+  @@index([customerId])
+  @@index([channel])
+  @@index([orderStatus])
+  @@index([paymentStatus])
+  @@index([createdByUserId])
+}
+
+model SalesOrderItem {
+  id                       String   @id @default(uuid()) @db.Uuid
+  salesOrderId             String   @db.Uuid
+  menuItemId               String   @db.Uuid
+  fulfilledInventoryItemId String   @db.Uuid
+  quantity                 Decimal  @db.Decimal(18,4)
+  unitPrice                Decimal  @db.Decimal(18,4)
+  lineTotal                Decimal  @db.Decimal(18,4)
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  salesOrder             SalesOrder    @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+  menuItem               MenuItem      @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
+  /// This links the sellable menu item back to the finished-good inventory that was depleted.
+  fulfilledInventoryItem InventoryItem @relation("SalesOrderItemFulfilledInventoryItem", fields: [fulfilledInventoryItemId], references: [id], onDelete: Restrict)
+  stockMovement          StockMovement? @relation("SalesOrderItemMovement")
+
+  @@index([salesOrderId])
+  @@index([menuItemId])
+  @@index([fulfilledInventoryItemId])
+}
+
+model Invoice {
+  id              String        @id @default(uuid()) @db.Uuid
+  businessId      String        @db.Uuid
+  storeId         String        @db.Uuid
+  salesOrderId    String        @unique @db.Uuid
+  createdByUserId String        @db.Uuid
+  invoiceNumber   String
+  issueDate       DateTime
+  dueDate         DateTime?
+  subtotal        Decimal       @db.Decimal(18,4)
+  discount        Decimal       @db.Decimal(18,4)
+  tax             Decimal       @db.Decimal(18,4)
+  total           Decimal       @db.Decimal(18,4)
+  status          InvoiceStatus @default(DRAFT)
+  notes           String?       @db.Text
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  business      Business   @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  store         Store      @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  salesOrder    SalesOrder @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+  createdByUser User       @relation("InvoiceCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([businessId, invoiceNumber])
+  @@index([businessId, storeId, issueDate])
+  @@index([status])
+  @@index([createdByUserId])
+}
+
+model Receipt {
+  id               String        @id @default(uuid()) @db.Uuid
+  businessId       String        @db.Uuid
+  storeId          String        @db.Uuid
+  salesOrderId     String        @db.Uuid
+  createdByUserId  String        @db.Uuid
+  receiptNumber    String
+  issuedAt         DateTime
+  amountPaid       Decimal       @db.Decimal(18,4)
+  paymentMethod    PaymentMethod
+  paymentReference String?
+  notes            String?       @db.Text
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  business      Business   @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  store         Store      @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  salesOrder    SalesOrder @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+  createdByUser User       @relation("ReceiptCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([businessId, receiptNumber])
+  @@index([businessId, storeId, issuedAt])
+  @@index([paymentMethod])
+  @@index([createdByUserId])
+}
+
+model Expense {
+  id              String   @id @default(uuid()) @db.Uuid
+  businessId      String   @db.Uuid
+  storeId         String   @db.Uuid
+  supplierId      String?  @db.Uuid
+  createdByUserId String   @db.Uuid
+  category        String
+  name            String
+  amount          Decimal  @db.Decimal(18,4)
+  incurredAt      DateTime
+  notes           String?  @db.Text
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  business      Business  @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  store         Store     @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  supplier      Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  createdByUser User      @relation("ExpenseCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  @@index([businessId, storeId, incurredAt])
+  @@index([supplierId])
+  @@index([createdByUserId])
+  @@index([category])
+}
+
+model InventoryReconciliation {
+  id              String               @id @default(uuid()) @db.Uuid
+  businessId      String               @db.Uuid
+  storeId         String               @db.Uuid
+  createdByUserId String               @db.Uuid
+  status          ReconciliationStatus @default(DRAFT)
+  startedAt       DateTime
+  postedAt        DateTime?
+  notes           String?              @db.Text
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  /// Posting a reconciliation should create inventory adjustment movements only for non-zero variance rows.
+  business      Business             @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  store         Store                @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  createdByUser User                 @relation("InventoryReconciliationCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  items         ReconciliationItem[]
+
+  @@index([businessId, storeId, startedAt])
+  @@index([status])
+  @@index([createdByUserId])
+}
+
+model ReconciliationItem {
+  id                        String   @id @default(uuid()) @db.Uuid
+  inventoryReconciliationId String   @db.Uuid
+  inventoryItemId           String   @db.Uuid
+  expectedQuantity          Decimal  @db.Decimal(18,4)
+  actualQuantity            Decimal  @db.Decimal(18,4)
+  varianceQuantity          Decimal  @db.Decimal(18,4)
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  inventoryReconciliation InventoryReconciliation @relation(fields: [inventoryReconciliationId], references: [id], onDelete: Restrict)
+  inventoryItem           InventoryItem           @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+  stockMovement           StockMovement?          @relation("ReconciliationItemMovement")
+
+  @@unique([inventoryReconciliationId, inventoryItemId])
+  @@index([inventoryItemId])
+}
+
+model StockMovement {
+  id                          String            @id @default(uuid()) @db.Uuid
+  businessId                  String            @db.Uuid
+  storeId                     String            @db.Uuid
+  inventoryItemId             String            @db.Uuid
+  createdByUserId             String            @db.Uuid
+  movementType                StockMovementType
+  quantityChange              Decimal           @db.Decimal(18,4)
+  occurredAt                  DateTime
+  notes                       String?           @db.Text
+  stockInItemId               String?           @unique @db.Uuid
+  productionBatchIngredientId String?           @unique @db.Uuid
+  productionBatchId           String?           @unique @db.Uuid
+  wasteLogId                  String?           @unique @db.Uuid
+  reconciliationItemId        String?           @unique @db.Uuid
+  salesOrderItemId            String?           @unique @db.Uuid
+  createdAt                   DateTime          @default(now())
+  updatedAt                   DateTime          @updatedAt
+
+  /// The stock ledger is append-only. Application code should never update or delete posted movements.
+  /// Exactly one source relation should be populated for each movement row.
+  business                  Business                   @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  store                     Store                      @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  inventoryItem             InventoryItem              @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+  createdByUser             User                       @relation("StockMovementCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  stockInItem               StockInItem?               @relation("StockInItemMovement", fields: [stockInItemId], references: [id], onDelete: Restrict)
+  productionBatchIngredient ProductionBatchIngredient? @relation("ProductionUseMovement", fields: [productionBatchIngredientId], references: [id], onDelete: Restrict)
+  productionBatch           ProductionBatch?           @relation("ProductionBatchOutputMovement", fields: [productionBatchId], references: [id], onDelete: Restrict)
+  wasteLog                  WasteLog?                  @relation("WasteLogMovement", fields: [wasteLogId], references: [id], onDelete: Restrict)
+  reconciliationItem        ReconciliationItem?        @relation("ReconciliationItemMovement", fields: [reconciliationItemId], references: [id], onDelete: Restrict)
+  salesOrderItem            SalesOrderItem?            @relation("SalesOrderItemMovement", fields: [salesOrderItemId], references: [id], onDelete: Restrict)
+
+  @@index([businessId, storeId, occurredAt])
+  @@index([inventoryItemId, occurredAt])
+  @@index([businessId, movementType, occurredAt])
+  @@index([createdByUserId])
+}
+
+
+
