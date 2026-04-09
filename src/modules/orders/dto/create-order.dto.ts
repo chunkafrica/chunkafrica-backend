@@ -39,6 +39,10 @@ export class CreateOrderItemDto {
 
 export class CreateOrderDto {
   @IsOptional()
+  @IsUUID()
+  customerId?: string;
+
+  @IsOptional()
   @IsEnum(SalesChannel)
   channel?: SalesChannel;
 

@@ -5,4 +5,8 @@ coverage/
 .env.local
 prisma/generated/
 *.log
+backend-runtime.err
+.codex-wave1/
+tmp-edge-profile/
 *.backup.json
+docs/wave-1-shared-item-migration.md

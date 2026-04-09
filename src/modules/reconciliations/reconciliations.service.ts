@@ -35,6 +35,31 @@ const reconciliationInclude = {
 type ReconciliationWithRelations = Prisma.InventoryReconciliationGetPayload<{
   include: typeof reconciliationInclude;
 }>;
+const reconciliationListInclude = {
+  createdByUser: {
+    select: {
+      id: true,
+      fullName: true,
+      email: true,
+    },
+  },
+  items: {
+    select: {
+      id: true,
+      actualQuantity: true,
+      varianceQuantity: true,
+    },
+  },
+  _count: {
+    select: {
+      items: true,
+    },
+  },
+} satisfies Prisma.InventoryReconciliationInclude;
+
+type ReconciliationListRecord = Prisma.InventoryReconciliationGetPayload<{
+  include: typeof reconciliationListInclude;
+}>;
 type DbClient = PrismaService | Prisma.TransactionClient;
 
 @Injectable()
@@ -48,7 +73,7 @@ export class ReconciliationsService {
   ) {
     await this.assertStoreAccess(this.prisma, user.businessId, storeId);
 
-    return this.prisma.inventoryReconciliation.findMany({
+    const reconciliations = await this.prisma.inventoryReconciliation.findMany({
       where: {
         businessId: user.businessId,
         storeId,
@@ -58,22 +83,13 @@ export class ReconciliationsService {
           lte: query.to,
         },
       },
-      include: {
-        createdByUser: {
-          select: {
-            id: true,
-            fullName: true,
-            email: true,
-          },
-        },
-        _count: {
-          select: {
-            items: true,
-          },
-        },
-      },
+      include: reconciliationListInclude,
       orderBy: [{ startedAt: 'desc' }, { createdAt: 'desc' }],
     });
+
+    return reconciliations.map((reconciliation) =>
+      this.mapReconciliationListRecord(reconciliation),
+    );
   }
 
   async getReconciliation(user: AuthUser, storeId: string, reconciliationId: string) {
@@ -334,5 +350,36 @@ export class ReconciliationsService {
     if (status !== ReconciliationStatus.DRAFT) {
       throw new BadRequestException('Only DRAFT reconciliation sessions can be modified.');
     }
+  }
+
+  private mapReconciliationListRecord(reconciliation: ReconciliationListRecord) {
+    const netVarianceQuantity = reconciliation.items.reduce(
+      (total, item) => total.plus(item.varianceQuantity),
+      new Prisma.Decimal(0),
+    );
+    const absoluteVarianceQuantity = reconciliation.items.reduce(
+      (total, item) => total.plus(item.varianceQuantity.abs()),
+      new Prisma.Decimal(0),
+    );
+
+    return {
+      id: reconciliation.id,
+      businessId: reconciliation.businessId,
+      storeId: reconciliation.storeId,
+      createdByUserId: reconciliation.createdByUserId,
+      status: reconciliation.status,
+      startedAt: reconciliation.startedAt,
+      postedAt: reconciliation.postedAt,
+      notes: reconciliation.notes,
+      createdAt: reconciliation.createdAt,
+      updatedAt: reconciliation.updatedAt,
+      createdByUser: reconciliation.createdByUser,
+      _count: reconciliation._count,
+      varianceSummary: {
+        recordedItems: reconciliation.items.length,
+        netVarianceQuantity,
+        absoluteVarianceQuantity,
+      },
+    };
   }
 }

@@ -25,6 +25,14 @@ import { ListOrdersQueryDto } from './dto/list-orders-query.dto';
 
 const salesOrderInclude = {
   store: true,
+  customer: {
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      phone: true,
+    },
+  },
   createdByUser: {
     select: {
       id: true,
@@ -125,6 +133,7 @@ export class OrdersService {
 
     return this.prisma.$transaction(async (tx) => {
       await this.assertStoreAccess(tx, user.businessId, storeId);
+      const customer = await this.resolveCustomer(tx, user.businessId, dto.customerId);
 
       const resolvedItems: Array<{ quantity: Prisma.Decimal; menuItem: MenuItem }> = [];
       for (const item of dto.items) {
@@ -220,6 +229,7 @@ export class OrdersService {
         data: {
           businessId: user.businessId,
           storeId,
+          customerId: customer?.id ?? null,
           createdByUserId: user.userId,
           orderNumber,
           channel: dto.channel ?? SalesChannel.WALK_IN,
@@ -463,6 +473,14 @@ export class OrdersService {
       );
     }
 
+    const finishedInventoryItem =
+      await this.findOrCreateSalesFinishedInventoryItemByProductName(
+        db,
+        businessId,
+        newProductName,
+        newProductPrice,
+      );
+
     return db.menuItem.create({
       data: {
         businessId,
@@ -470,6 +488,7 @@ export class OrdersService {
         description: 'Auto-created from Sales Ops.',
         defaultPrice: newProductPrice,
         isActive: true,
+        inventoryItemId: finishedInventoryItem.id,
       },
     });
   }
@@ -479,6 +498,33 @@ export class OrdersService {
     businessId: string,
     menuItem: MenuItem,
   ): Promise<InventoryItem> {
+    const linkedInventoryItem = await db.inventoryItem.findFirst({
+      where: {
+        id: menuItem.inventoryItemId,
+        businessId,
+        deletedAt: null,
+        isActive: true,
+      },
+    });
+
+    if (linkedInventoryItem) {
+      return linkedInventoryItem;
+    }
+
+    return this.findOrCreateSalesFinishedInventoryItemByProductName(
+      db,
+      businessId,
+      menuItem.name,
+      menuItem.defaultPrice,
+    );
+  }
+
+  private async findOrCreateSalesFinishedInventoryItemByProductName(
+    db: DbClient,
+    businessId: string,
+    productName: string,
+    defaultSellingPrice: Prisma.Decimal,
+  ): Promise<InventoryItem> {
     const existingInventoryItem = await db.inventoryItem.findFirst({
       where: {
         businessId,
@@ -486,7 +532,7 @@ export class OrdersService {
         isActive: true,
         itemType: InventoryItemType.FINISHED_GOOD,
         name: {
-          equals: menuItem.name,
+          equals: productName,
           mode: 'insensitive',
         },
       },
@@ -502,11 +548,11 @@ export class OrdersService {
     return db.inventoryItem.create({
       data: {
         businessId,
-        name: menuItem.name,
+        name: productName,
         description: 'Auto-created from Sales Ops.',
         itemType: InventoryItemType.FINISHED_GOOD,
         unitOfMeasure: 'unit',
-        defaultSellingPrice: menuItem.defaultPrice,
+        defaultSellingPrice,
         isActive: true,
         trackExpiry: false,
       },
@@ -528,6 +574,34 @@ export class OrdersService {
     }
 
     return store;
+  }
+
+  private async resolveCustomer(
+    db: DbClient,
+    businessId: string,
+    customerId: string | undefined,
+  ) {
+    if (!customerId) {
+      return null;
+    }
+
+    const customer = await db.customer.findFirst({
+      where: {
+        id: customerId,
+        businessId,
+        deletedAt: null,
+        isActive: true,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (!customer) {
+      throw new NotFoundException('Customer not found.');
+    }
+
+    return customer;
   }
 
   private async findOrderOrThrow(
@@ -574,6 +648,14 @@ export class OrdersService {
 
     return {
       ...order,
+      customer: order.customer
+        ? {
+            id: order.customer.id,
+            name: order.customer.name,
+            email: order.customer.email,
+            phone: order.customer.phone,
+          }
+        : null,
       paidAmount,
       outstandingBalance: order.total.minus(paidAmount),
       receiptsSummary: {

@@ -1,6 +1,12 @@
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
 import { AuthUser } from './auth-user.interface';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  getAuthContextMode,
+  getConfiguredAuthUserSelector,
+  getValidationWorkspaceAuthUserSelector,
+  normalizeValidationWorkspaceKey,
+} from './auth-context-mode';
 
 type FallbackUserRecord = {
   id: string;
@@ -11,33 +17,31 @@ type FallbackUserRecord = {
   };
 };
 
+type AuthenticatedRequest = {
+  user?: Partial<AuthUser>;
+  headers?: Record<string, string | string[] | undefined>;
+  cookies?: Record<string, string | undefined>;
+};
+
+const VALIDATION_WORKSPACE_HEADER = 'x-chunk-validation-workspace';
+const VALIDATION_WORKSPACE_COOKIE = 'chunk.validationWorkspace';
+
 function normalizeRoleName(roleName: string) {
   return roleName.trim().replace(/[\s-]+/g, '_').toUpperCase();
 }
 
 @Injectable()
 export class UserContextGuard implements CanActivate {
-  private fallbackUserPromise: Promise<AuthUser | null> | null = null;
+  private fallbackUserPromises = new Map<string, Promise<AuthUser | null>>();
 
   constructor(private readonly prisma: PrismaService) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const request = context.switchToHttp().getRequest<{ user?: Partial<AuthUser> }>();
+    const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
     const user = request.user;
 
-    // Temporary development auth bypass
-    if (process.env.NODE_ENV === 'development' && (!user?.userId || !user?.businessId)) {
-      request.user = {
-        userId: '11111111-1111-1111-1111-111111111111',
-        businessId: '22222222-2222-2222-2222-222222222222',
-        roleNames: ['ADMIN'],
-        primaryStoreId: null,
-      };
-      return true;
-    }
-
     if (!user?.userId || !user?.businessId) {
-      const fallbackUser = await this.resolveFallbackUser();
+      const fallbackUser = await this.resolveFallbackUser(request);
 
       if (fallbackUser) {
         request.user = fallbackUser;
@@ -59,17 +63,28 @@ export class UserContextGuard implements CanActivate {
     return true;
   }
 
-  private async resolveFallbackUser(): Promise<AuthUser | null> {
-    if (!this.fallbackUserPromise) {
-      this.fallbackUserPromise = this.loadFallbackUser();
+  private async resolveFallbackUser(
+    request: AuthenticatedRequest,
+  ): Promise<AuthUser | null> {
+    const cacheKey = this.getFallbackCacheKey(request);
+    const cachedPromise = this.fallbackUserPromises.get(cacheKey);
+
+    if (cachedPromise) {
+      return cachedPromise;
     }
 
-    return this.fallbackUserPromise;
+    const fallbackUserPromise = this.loadFallbackUser(request);
+    this.fallbackUserPromises.set(cacheKey, fallbackUserPromise);
+
+    return fallbackUserPromise;
   }
 
-  private async loadFallbackUser(): Promise<AuthUser | null> {
-    const configuredUserId = process.env.DEFAULT_AUTH_USER_ID?.trim();
-    const configuredUserEmail = process.env.DEFAULT_AUTH_EMAIL?.trim();
+  private async loadFallbackUser(
+    request: AuthenticatedRequest,
+  ): Promise<AuthUser | null> {
+    const configuredUserSelector = this.resolveConfiguredUserSelector(request);
+    const configuredUserId = configuredUserSelector.userId;
+    const configuredUserEmail = configuredUserSelector.email;
 
     if (configuredUserId || configuredUserEmail) {
       const user = await this.prisma.user.findFirst({
@@ -88,7 +103,19 @@ export class UserContextGuard implements CanActivate {
         },
       });
 
+      if (!user && configuredUserSelector.requireExplicitSelection) {
+        throw new UnauthorizedException(
+          'Validation auth mode is enabled, but the configured validation user could not be found.',
+        );
+      }
+
       return user ? this.mapFallbackUser(user) : null;
+    }
+
+    if (configuredUserSelector.requireExplicitSelection) {
+      throw new UnauthorizedException(
+        'Validation auth mode requires VALIDATION_AUTH_USER_ID or VALIDATION_AUTH_EMAIL.',
+      );
     }
 
     const users = await this.prisma.user.findMany({
@@ -114,6 +141,41 @@ export class UserContextGuard implements CanActivate {
     }
 
     return this.mapFallbackUser(users[0]);
+  }
+
+  private resolveConfiguredUserSelector(request: AuthenticatedRequest) {
+    if (getAuthContextMode() === 'validation') {
+      const requestedWorkspaceKey = normalizeValidationWorkspaceKey(
+        request.headers?.[VALIDATION_WORKSPACE_HEADER] ??
+          request.cookies?.[VALIDATION_WORKSPACE_COOKIE] ??
+          null,
+      );
+
+      if (requestedWorkspaceKey) {
+        const workspaceSelector =
+          getValidationWorkspaceAuthUserSelector(requestedWorkspaceKey);
+
+        if (workspaceSelector.userId || workspaceSelector.email) {
+          return workspaceSelector;
+        }
+
+        throw new UnauthorizedException(
+          `Validation auth mode is enabled, but the selected workspace "${requestedWorkspaceKey}" is not configured.`,
+        );
+      }
+    }
+
+    return getConfiguredAuthUserSelector();
+  }
+
+  private getFallbackCacheKey(request: AuthenticatedRequest) {
+    const configuredUserSelector = this.resolveConfiguredUserSelector(request);
+
+    return [
+      configuredUserSelector.userId ?? '',
+      configuredUserSelector.email ?? '',
+      configuredUserSelector.requireExplicitSelection ? 'explicit' : 'default',
+    ].join('|');
   }
 
   private mapFallbackUser(user: FallbackUserRecord): AuthUser {

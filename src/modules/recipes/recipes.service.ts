@@ -69,6 +69,12 @@ export class RecipesService {
 
   async createMenuItem(user: AuthUser, dto: CreateMenuItemDto) {
     try {
+      const linkedInventoryItem = await this.findFinishedInventoryItemForMenuItemCreate(
+        this.prisma,
+        user.businessId,
+        dto.name,
+      );
+
       return await this.prisma.menuItem.create({
         data: {
           businessId: user.businessId,
@@ -76,6 +82,7 @@ export class RecipesService {
           description: dto.description?.trim(),
           defaultPrice: new Prisma.Decimal(dto.defaultPrice),
           isActive: dto.isActive ?? true,
+          inventoryItemId: linkedInventoryItem.id,
         },
       });
     } catch (error) {
@@ -349,6 +356,38 @@ export class RecipesService {
       WHERE "menuItemId" = ${menuItemId}
       FOR UPDATE
     `;
+  }
+
+  private async findFinishedInventoryItemForMenuItemCreate(
+    db: DbClient,
+    businessId: string,
+    menuItemName: string,
+  ) {
+    const normalizedName = menuItemName.trim();
+
+    const inventoryItem = await db.inventoryItem.findFirst({
+      where: {
+        businessId,
+        deletedAt: null,
+        isActive: true,
+        itemType: InventoryItemType.FINISHED_GOOD,
+        name: {
+          equals: normalizedName,
+          mode: 'insensitive',
+        },
+      },
+      orderBy: {
+        createdAt: 'asc',
+      },
+    });
+
+    if (!inventoryItem) {
+      throw new BadRequestException(
+        `Create an active finished good named ${normalizedName} before creating its sellable product.`,
+      );
+    }
+
+    return inventoryItem;
   }
 
   private handleUniqueConstraint(error: unknown, message: string): asserts error is Prisma.PrismaClientKnownRequestError {
