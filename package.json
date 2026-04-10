@@ -2,6 +2,9 @@
   "name": "chunk-food-production-backend",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=18.19.1"
+  },
   "scripts": {
     "prestart": "npm run build",
     "prebuild": "npm run prisma:generate",
@@ -9,7 +12,7 @@
     "start": "npm run start:prod",
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main.js",
-    "prisma:generate": "prisma generate && node scripts/sync-prisma-client.cjs",
+    "prisma:generate": "npx prisma generate",
     "prisma:migrate:dev": "prisma migrate dev",
     "prisma:seed": "ts-node prisma/seed.ts"
   },
