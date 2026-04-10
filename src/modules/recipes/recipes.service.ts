@@ -69,7 +69,7 @@ export class RecipesService {
 
   async createMenuItem(user: AuthUser, dto: CreateMenuItemDto) {
     try {
-      const linkedInventoryItem = await this.findFinishedInventoryItemForMenuItemCreate(
+      await this.findFinishedInventoryItemForMenuItemCreate(
         this.prisma,
         user.businessId,
         dto.name,
@@ -82,7 +82,6 @@ export class RecipesService {
           description: dto.description?.trim(),
           defaultPrice: new Prisma.Decimal(dto.defaultPrice),
           isActive: dto.isActive ?? true,
-          inventoryItemId: linkedInventoryItem.id,
         },
       });
     } catch (error) {

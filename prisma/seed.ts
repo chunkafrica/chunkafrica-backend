@@ -477,7 +477,6 @@ async function ensureCatalog(prisma: PrismaClient) {
     where: { id: ids.menu.tomatoSoup },
     update: {
       businessId: ids.business,
-      inventoryItemId: ids.inventory.tomatoSoupBowl,
       name: 'Tomato Soup',
       defaultPrice: '2500',
       isActive: true,
@@ -486,7 +485,6 @@ async function ensureCatalog(prisma: PrismaClient) {
     create: {
       id: ids.menu.tomatoSoup,
       businessId: ids.business,
-      inventoryItemId: ids.inventory.tomatoSoupBowl,
       name: 'Tomato Soup',
       defaultPrice: '2500',
     },
@@ -496,7 +494,6 @@ async function ensureCatalog(prisma: PrismaClient) {
     where: { id: ids.menu.turkeyPie },
     update: {
       businessId: ids.business,
-      inventoryItemId: ids.inventory.turkeyPie,
       name: 'Turkey Pie',
       defaultPrice: '3500',
       isActive: true,
@@ -505,7 +502,6 @@ async function ensureCatalog(prisma: PrismaClient) {
     create: {
       id: ids.menu.turkeyPie,
       businessId: ids.business,
-      inventoryItemId: ids.inventory.turkeyPie,
       name: 'Turkey Pie',
       defaultPrice: '3500',
     },
@@ -1763,7 +1759,6 @@ async function ensureFashionCatalog(prisma: PrismaClient) {
     where: { id: fashionIds.menu.utilityJacket },
     update: {
       businessId: fashionIds.business,
-      inventoryItemId: fashionIds.inventory.utilityJacketUnit,
       name: 'Utility Jacket',
       defaultPrice: '32000',
       isActive: true,
@@ -1772,7 +1767,6 @@ async function ensureFashionCatalog(prisma: PrismaClient) {
     create: {
       id: fashionIds.menu.utilityJacket,
       businessId: fashionIds.business,
-      inventoryItemId: fashionIds.inventory.utilityJacketUnit,
       name: 'Utility Jacket',
       defaultPrice: '32000',
     },

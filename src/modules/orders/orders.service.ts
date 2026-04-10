@@ -473,13 +473,12 @@ export class OrdersService {
       );
     }
 
-    const finishedInventoryItem =
-      await this.findOrCreateSalesFinishedInventoryItemByProductName(
-        db,
-        businessId,
-        newProductName,
-        newProductPrice,
-      );
+    await this.findOrCreateSalesFinishedInventoryItemByProductName(
+      db,
+      businessId,
+      newProductName,
+      newProductPrice,
+    );
 
     return db.menuItem.create({
       data: {
@@ -488,7 +487,6 @@ export class OrdersService {
         description: 'Auto-created from Sales Ops.',
         defaultPrice: newProductPrice,
         isActive: true,
-        inventoryItemId: finishedInventoryItem.id,
       },
     });
   }
@@ -498,19 +496,6 @@ export class OrdersService {
     businessId: string,
     menuItem: MenuItem,
   ): Promise<InventoryItem> {
-    const linkedInventoryItem = await db.inventoryItem.findFirst({
-      where: {
-        id: menuItem.inventoryItemId,
-        businessId,
-        deletedAt: null,
-        isActive: true,
-      },
-    });
-
-    if (linkedInventoryItem) {
-      return linkedInventoryItem;
-    }
-
     return this.findOrCreateSalesFinishedInventoryItemByProductName(
       db,
       businessId,

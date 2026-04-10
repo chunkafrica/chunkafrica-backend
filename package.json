@@ -4,11 +4,12 @@
   "private": true,
   "scripts": {
     "prestart": "npm run build",
+    "prebuild": "npm run prisma:generate",
     "build": "nest build",
     "start": "npm run start:prod",
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main.js",
-    "prisma:generate": "prisma generate",
+    "prisma:generate": "prisma generate && node scripts/sync-prisma-client.cjs",
     "prisma:migrate:dev": "prisma migrate dev",
     "prisma:seed": "ts-node prisma/seed.ts"
   },
