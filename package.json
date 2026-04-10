@@ -9,7 +9,7 @@
   "scripts": {
     "prestart": "npm run build",
     "prebuild": "npm run prisma:generate",
-    "build": "nest build",
+    "build": "node ./node_modules/@nestjs/cli/bin/nest.js build",
     "start": "npm run start:prod",
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main.js",
