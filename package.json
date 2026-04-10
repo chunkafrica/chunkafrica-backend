@@ -5,6 +5,7 @@
   "engines": {
     "node": ">=18.19.1"
   },
+  "packageManager": "npm@10.9.2",
   "scripts": {
     "prestart": "npm run build",
     "prebuild": "npm run prisma:generate",
