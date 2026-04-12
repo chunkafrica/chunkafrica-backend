@@ -65,6 +65,12 @@ export class ReportsService {
           },
           include: {
             menuItem: true,
+            recipe: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
             producedInventoryItem: true,
           },
           orderBy: [{ batchDate: 'desc' }, { createdAt: 'desc' }],
@@ -114,6 +120,14 @@ export class ReportsService {
       this.getVarianceAlerts(user.businessId, storeId, range, RECENT_LIMIT),
     ]);
 
+    const normalizedRecentProductionBatches = recentProductionBatches.map((batch) => ({
+      ...batch,
+      menuItem: batch.menuItem ?? {
+        id: batch.recipe?.id ?? batch.id,
+        name: batch.recipe?.name ?? batch.producedInventoryItem.name,
+      },
+    }));
+
     return {
       range,
       totals: {
@@ -123,7 +137,7 @@ export class ReportsService {
       },
       lowStockItems,
       recentStockIns,
-      recentProductionBatches,
+      recentProductionBatches: normalizedRecentProductionBatches,
       recentWasteLogs,
       recentReconciliations,
       topSellingMenuItems,
@@ -247,6 +261,12 @@ export class ReportsService {
       },
       include: {
         menuItem: true,
+        recipe: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
         producedInventoryItem: true,
       },
       orderBy: [{ batchDate: 'desc' }, { createdAt: 'desc' }],
@@ -257,10 +277,12 @@ export class ReportsService {
 
     const topProducedItems = Array.from(
       completedBatches.reduce((accumulator, batch) => {
-        const key = batch.menuItemId;
+        const key = batch.menuItemId ?? batch.recipeId;
+        const displayName =
+          batch.menuItem?.name ?? batch.recipe?.name ?? batch.producedInventoryItem.name;
         const existing = accumulator.get(key) ?? {
-          menuItemId: batch.menuItemId,
-          menuItemName: batch.menuItem.name,
+          menuItemId: key,
+          menuItemName: displayName,
           producedInventoryItemId: batch.producedInventoryItemId,
           outputQuantity: new Prisma.Decimal(0),
           completedBatches: 0,
@@ -287,7 +309,13 @@ export class ReportsService {
         totalOutputQuantity: outputQuantity,
       },
       topProducedItems,
-      recentBatches: batches.slice(0, 10),
+      recentBatches: batches.slice(0, 10).map((batch) => ({
+        ...batch,
+        menuItem: batch.menuItem ?? {
+          id: batch.recipe?.id ?? batch.id,
+          name: batch.recipe?.name ?? batch.producedInventoryItem.name,
+        },
+      })),
     };
   }
 

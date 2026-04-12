@@ -5,7 +5,6 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
-  MenuItem,
   Prisma,
   ProductionBatchStatus,
   StockMovementType,
@@ -48,8 +47,37 @@ const batchDetailInclude = {
   outputStockMovement: true,
 } satisfies Prisma.ProductionBatchInclude;
 
+const batchSummaryInclude = {
+  menuItem: true,
+  recipe: {
+    select: {
+      id: true,
+      name: true,
+      version: true,
+      isActive: true,
+      yieldQuantity: true,
+    },
+  },
+  producedInventoryItem: true,
+  createdByUser: {
+    select: {
+      id: true,
+      fullName: true,
+      email: true,
+    },
+  },
+  _count: {
+    select: {
+      ingredients: true,
+    },
+  },
+} satisfies Prisma.ProductionBatchInclude;
+
 type ProductionBatchWithRelations = Prisma.ProductionBatchGetPayload<{
   include: typeof batchDetailInclude;
+}>;
+type ProductionBatchSummaryRecord = Prisma.ProductionBatchGetPayload<{
+  include: typeof batchSummaryInclude;
 }>;
 type ActiveRecipeForBatch = Prisma.RecipeGetPayload<{
   include: {
@@ -74,7 +102,7 @@ export class ProductionBatchesService {
   ) {
     await this.assertStoreAccess(this.prisma, user.businessId, storeId);
 
-    return this.prisma.productionBatch.findMany({
+    const batches = await this.prisma.productionBatch.findMany({
       where: {
         businessId: user.businessId,
         storeId,
@@ -84,36 +112,17 @@ export class ProductionBatchesService {
           lte: query.to,
         },
       },
-      include: {
-        menuItem: true,
-        recipe: {
-          select: {
-            id: true,
-            version: true,
-            isActive: true,
-          },
-        },
-        producedInventoryItem: true,
-        createdByUser: {
-          select: {
-            id: true,
-            fullName: true,
-            email: true,
-          },
-        },
-        _count: {
-          select: {
-            ingredients: true,
-          },
-        },
-      },
+      include: batchSummaryInclude,
       orderBy: [{ batchDate: 'desc' }, { createdAt: 'desc' }],
     });
+
+    return batches.map((batch) => this.serializeBatchSummary(batch));
   }
 
   async getProductionBatch(user: AuthUser, storeId: string, batchId: string) {
     await this.assertStoreAccess(this.prisma, user.businessId, storeId);
-    return this.findBatchOrThrow(this.prisma, user.businessId, storeId, batchId);
+    const batch = await this.findBatchOrThrow(this.prisma, user.businessId, storeId, batchId);
+    return this.serializeBatchDetail(batch);
   }
 
   async createProductionBatch(
@@ -124,11 +133,9 @@ export class ProductionBatchesService {
     await this.assertStoreAccess(this.prisma, user.businessId, storeId);
 
     return this.prisma.$transaction(async (tx) => {
-      await this.findMenuItemOrThrow(tx, user.businessId, dto.menuItemId);
       const recipe = await this.findActiveRecipeForBatchOrThrow(
         tx,
         user.businessId,
-        dto.menuItemId,
         dto.recipeId,
       );
 
@@ -139,11 +146,11 @@ export class ProductionBatchesService {
         dto.batchNumber,
       );
 
-      return tx.productionBatch.create({
+      const createdBatch = await tx.productionBatch.create({
         data: {
           businessId: user.businessId,
           storeId,
-          menuItemId: dto.menuItemId,
+          menuItemId: recipe.menuItemId,
           recipeId: recipe.id,
           producedInventoryItemId: recipe.producedInventoryItemId,
           createdByUserId: user.userId,
@@ -151,13 +158,18 @@ export class ProductionBatchesService {
           recipeVersionUsed: recipe.version,
           batchDate: dto.batchDate,
           plannedOutputQuantity:
-            dto.plannedOutputQuantity !== undefined ? toDecimal(dto.plannedOutputQuantity) : null,
+            dto.plannedOutputQuantity !== undefined
+              ? toDecimal(dto.plannedOutputQuantity)
+              : recipe.yieldQuantity,
           actualOutputQuantity: new Prisma.Decimal(0),
+          outputVarianceQuantity: new Prisma.Decimal(0),
           status: ProductionBatchStatus.PLANNED,
           notes: dto.notes?.trim(),
         },
         include: batchDetailInclude,
       });
+
+      return this.serializeBatchDetail(createdBatch);
     });
   }
 
@@ -178,27 +190,31 @@ export class ProductionBatchesService {
       let nextProducedInventoryItemId = batch.producedInventoryItemId;
       let nextRecipeVersionUsed = batch.recipeVersionUsed;
 
-      if (dto.menuItemId || dto.recipeId) {
-        nextMenuItemId = dto.menuItemId ?? batch.menuItemId;
-        nextRecipeId = dto.recipeId ?? batch.recipeId;
+      if (dto.recipeId) {
+        nextRecipeId = dto.recipeId;
 
-        await this.findMenuItemOrThrow(tx, user.businessId, nextMenuItemId);
         const recipe = await this.findActiveRecipeForBatchOrThrow(
           tx,
           user.businessId,
-          nextMenuItemId,
           nextRecipeId,
         );
 
+        nextMenuItemId = recipe.menuItemId;
         nextProducedInventoryItemId = recipe.producedInventoryItemId;
         nextRecipeVersionUsed = recipe.version;
       }
 
       const nextBatchNumber = dto.batchNumber
-        ? await this.resolveBatchNumber(tx, user.businessId, batch.batchDate, dto.batchNumber, batch.id)
+        ? await this.resolveBatchNumber(
+            tx,
+            user.businessId,
+            dto.batchDate ?? batch.batchDate,
+            dto.batchNumber,
+            batch.id,
+          )
         : batch.batchNumber;
 
-      return tx.productionBatch.update({
+      const updatedBatch = await tx.productionBatch.update({
         where: { id: batch.id },
         data: {
           menuItemId: nextMenuItemId,
@@ -207,12 +223,16 @@ export class ProductionBatchesService {
           recipeVersionUsed: nextRecipeVersionUsed,
           batchDate: dto.batchDate,
           plannedOutputQuantity:
-            dto.plannedOutputQuantity !== undefined ? toDecimal(dto.plannedOutputQuantity) : undefined,
+            dto.plannedOutputQuantity !== undefined
+              ? toDecimal(dto.plannedOutputQuantity)
+              : undefined,
           batchNumber: nextBatchNumber,
           notes: dto.notes?.trim(),
         },
         include: batchDetailInclude,
       });
+
+      return this.serializeBatchDetail(updatedBatch);
     });
   }
 
@@ -224,11 +244,13 @@ export class ProductionBatchesService {
       throw new BadRequestException('Only PLANNED batches can be started.');
     }
 
-    return this.prisma.productionBatch.update({
+    const startedBatch = await this.prisma.productionBatch.update({
       where: { id: batch.id },
       data: { status: ProductionBatchStatus.IN_PROGRESS },
       include: batchDetailInclude,
     });
+
+    return this.serializeBatchDetail(startedBatch);
   }
 
   async completeProductionBatch(
@@ -252,7 +274,13 @@ export class ProductionBatchesService {
         throw new BadRequestException('The selected recipe has an invalid yield quantity.');
       }
 
+      const expectedOutputQuantity = batch.plannedOutputQuantity ?? recipe.yieldQuantity;
+      if (expectedOutputQuantity.lessThanOrEqualTo(0)) {
+        throw new BadRequestException('The selected batch has an invalid expected output quantity.');
+      }
+
       const outputQuantity = toDecimal(dto.actualOutputQuantity)!;
+      const outputVarianceQuantity = outputQuantity.minus(expectedOutputQuantity);
       const completedAt = dto.completedAt;
       const ingredientOverrides = new Map<string, Prisma.Decimal>();
       const overrideIds = new Set<string>();
@@ -274,7 +302,9 @@ export class ProductionBatchesService {
       }
 
       const usageLines = recipe.recipeItems.map((item) => {
-        const expectedQuantity = item.quantityRequired.mul(outputQuantity).div(recipe.yieldQuantity);
+        const expectedQuantity = item.quantityRequired
+          .mul(expectedOutputQuantity)
+          .div(recipe.yieldQuantity);
         const actualQuantity = ingredientOverrides.get(item.inventoryItemId) ?? expectedQuantity;
         const varianceQuantity = actualQuantity.minus(expectedQuantity);
 
@@ -369,17 +399,21 @@ export class ProductionBatchesService {
         where: { id: batch.id },
         data: {
           actualOutputQuantity: outputQuantity,
+          outputVarianceQuantity,
           recipeVersionUsed: recipe.version,
           producedInventoryItemId: recipe.producedInventoryItemId,
+          menuItemId: recipe.menuItemId,
           status: ProductionBatchStatus.COMPLETED,
           notes: dto.notes?.trim() ?? batch.notes,
         },
       });
 
-      return tx.productionBatch.findUniqueOrThrow({
+      const completedBatch = await tx.productionBatch.findUniqueOrThrow({
         where: { id: batch.id },
         include: batchDetailInclude,
       });
+
+      return this.serializeBatchDetail(completedBatch);
     });
   }
 
@@ -389,11 +423,43 @@ export class ProductionBatchesService {
     const batch = await this.findBatchOrThrow(this.prisma, user.businessId, storeId, batchId);
     this.assertBatchEditable(batch.status);
 
-    return this.prisma.productionBatch.update({
+    const cancelledBatch = await this.prisma.productionBatch.update({
       where: { id: batch.id },
       data: { status: ProductionBatchStatus.CANCELLED },
       include: batchDetailInclude,
     });
+
+    return this.serializeBatchDetail(cancelledBatch);
+  }
+
+  private serializeBatchSummary(batch: ProductionBatchSummaryRecord) {
+    const definitionName =
+      batch.menuItem?.name ?? batch.recipe?.name ?? batch.producedInventoryItem.name;
+
+    return {
+      ...batch,
+      menuItem: batch.menuItem ?? {
+        id: batch.recipe.id,
+        name: definitionName,
+      },
+      outputVarianceQuantity: batch.outputVarianceQuantity ?? new Prisma.Decimal(0),
+      expectedOutputQuantity: batch.plannedOutputQuantity ?? batch.recipe.yieldQuantity,
+    };
+  }
+
+  private serializeBatchDetail(batch: ProductionBatchWithRelations) {
+    const definitionName =
+      batch.menuItem?.name ?? batch.recipe.name ?? batch.producedInventoryItem.name;
+
+    return {
+      ...batch,
+      menuItem: batch.menuItem ?? {
+        id: batch.recipe.id,
+        name: definitionName,
+      },
+      outputVarianceQuantity: batch.outputVarianceQuantity ?? new Prisma.Decimal(0),
+      expectedOutputQuantity: batch.plannedOutputQuantity ?? batch.recipe.yieldQuantity,
+    };
   }
 
   private async findBatchOrThrow(
@@ -435,37 +501,15 @@ export class ProductionBatchesService {
     return store;
   }
 
-  private async findMenuItemOrThrow(
-    db: DbClient,
-    businessId: string,
-    menuItemId: string,
-  ): Promise<MenuItem> {
-    const menuItem = await db.menuItem.findFirst({
-      where: {
-        id: menuItemId,
-        businessId,
-        deletedAt: null,
-      },
-    });
-
-    if (!menuItem) {
-      throw new NotFoundException('Menu item not found.');
-    }
-
-    return menuItem;
-  }
-
   private async findActiveRecipeForBatchOrThrow(
     db: DbClient,
     businessId: string,
-    menuItemId: string,
     recipeId: string,
   ): Promise<ActiveRecipeForBatch> {
     const recipe = await db.recipe.findFirst({
       where: {
         id: recipeId,
         businessId,
-        menuItemId,
         isActive: true,
         deletedAt: null,
       },
@@ -480,9 +524,7 @@ export class ProductionBatchesService {
     });
 
     if (!recipe) {
-      throw new NotFoundException(
-        'Active recipe not found for the selected menu item.',
-      );
+      throw new NotFoundException('Active production definition not found.');
     }
 
     return recipe;

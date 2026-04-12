@@ -11,9 +11,6 @@ import {
 
 export class CreateProductionBatchDto {
   @IsUUID()
-  menuItemId!: string;
-
-  @IsUUID()
   recipeId!: string;
 
   @Type(() => Date)

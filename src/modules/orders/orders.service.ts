@@ -167,6 +167,10 @@ export class OrdersService {
 
       const recipeMap = new Map<string, (typeof activeRecipes)[number]>();
       for (const recipe of activeRecipes) {
+        if (!recipe.menuItemId) {
+          continue;
+        }
+
         if (recipeMap.has(recipe.menuItemId)) {
           throw new ConflictException(
             'A menu item has multiple active recipes. Resolve recipe activation before creating the order.',

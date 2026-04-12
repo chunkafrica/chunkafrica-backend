@@ -1,8 +1,10 @@
 import { Type } from 'class-transformer';
+import { ProductionDefinitionType } from '@prisma/client';
 import {
   ArrayMaxSize,
   ArrayMinSize,
   IsArray,
+  IsEnum,
   IsNumber,
   IsOptional,
   IsPositive,
@@ -23,8 +25,16 @@ export class CreateRecipeItemDto {
 }
 
 export class CreateRecipeDto {
+  @IsString()
+  @MaxLength(120)
+  name!: string;
+
+  @IsEnum(ProductionDefinitionType)
+  definitionType!: ProductionDefinitionType;
+
+  @IsOptional()
   @IsUUID()
-  menuItemId!: string;
+  menuItemId?: string;
 
   @IsUUID()
   producedInventoryItemId!: string;

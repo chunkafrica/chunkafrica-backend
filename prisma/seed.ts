@@ -511,6 +511,8 @@ async function ensureCatalog(prisma: PrismaClient) {
     where: { id: ids.recipe.tomatoSoup },
     update: {
       businessId: ids.business,
+      name: 'Tomato Soup Recipe',
+      definitionType: 'RECIPE',
       menuItemId: ids.menu.tomatoSoup,
       producedInventoryItemId: ids.inventory.tomatoSoupBowl,
       version: 1,
@@ -522,6 +524,8 @@ async function ensureCatalog(prisma: PrismaClient) {
     create: {
       id: ids.recipe.tomatoSoup,
       businessId: ids.business,
+      name: 'Tomato Soup Recipe',
+      definitionType: 'RECIPE',
       menuItemId: ids.menu.tomatoSoup,
       producedInventoryItemId: ids.inventory.tomatoSoupBowl,
       version: 1,
@@ -534,6 +538,8 @@ async function ensureCatalog(prisma: PrismaClient) {
     where: { id: ids.recipe.turkeyPie },
     update: {
       businessId: ids.business,
+      name: 'Turkey Pie Recipe',
+      definitionType: 'RECIPE',
       menuItemId: ids.menu.turkeyPie,
       producedInventoryItemId: ids.inventory.turkeyPie,
       version: 1,
@@ -545,6 +551,8 @@ async function ensureCatalog(prisma: PrismaClient) {
     create: {
       id: ids.recipe.turkeyPie,
       businessId: ids.business,
+      name: 'Turkey Pie Recipe',
+      definitionType: 'RECIPE',
       menuItemId: ids.menu.turkeyPie,
       producedInventoryItemId: ids.inventory.turkeyPie,
       version: 1,
@@ -1776,6 +1784,8 @@ async function ensureFashionCatalog(prisma: PrismaClient) {
     where: { id: fashionIds.recipe.utilityJacket },
     update: {
       businessId: fashionIds.business,
+      name: 'Utility Jacket BOM',
+      definitionType: 'BOM_SPEC',
       menuItemId: fashionIds.menu.utilityJacket,
       producedInventoryItemId: fashionIds.inventory.utilityJacketUnit,
       version: 1,
@@ -1788,6 +1798,8 @@ async function ensureFashionCatalog(prisma: PrismaClient) {
     create: {
       id: fashionIds.recipe.utilityJacket,
       businessId: fashionIds.business,
+      name: 'Utility Jacket BOM',
+      definitionType: 'BOM_SPEC',
       menuItemId: fashionIds.menu.utilityJacket,
       producedInventoryItemId: fashionIds.inventory.utilityJacketUnit,
       version: 1,

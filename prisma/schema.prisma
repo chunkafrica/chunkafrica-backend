@@ -14,8 +14,14 @@ enum StoreType {
 
 enum InventoryItemType {
   RAW_MATERIAL
+  INTERMEDIATE
   FINISHED_GOOD
   PACKAGING
+}
+
+enum ProductionDefinitionType {
+  RECIPE
+  BOM_SPEC
 }
 
 enum StockMovementType {
@@ -277,7 +283,9 @@ model MenuItem {
 model Recipe {
   id                      String   @id @default(uuid()) @db.Uuid
   businessId              String   @db.Uuid
-  menuItemId              String   @db.Uuid
+  name                    String
+  definitionType          ProductionDefinitionType @default(RECIPE)
+  menuItemId              String?  @db.Uuid
   producedInventoryItemId String   @db.Uuid
   version                 Int
   yieldQuantity           Decimal  @db.Decimal(18,4)
@@ -289,12 +297,12 @@ model Recipe {
 
   /// Recipes are versioned snapshots. Create a new row instead of mutating a recipe that has been used.
   business              Business      @relation(fields: [businessId], references: [id], onDelete: Restrict)
-  menuItem              MenuItem      @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
+  menuItem              MenuItem?     @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
   producedInventoryItem InventoryItem @relation("RecipeOutputInventoryItem", fields: [producedInventoryItemId], references: [id], onDelete: Restrict)
   recipeItems           RecipeItem[]
   productionBatches     ProductionBatch[]
 
-  @@unique([menuItemId, version])
+  @@unique([producedInventoryItemId, version])
   @@index([businessId, menuItemId])
   @@index([producedInventoryItemId])
   @@index([businessId, deletedAt])
@@ -362,7 +370,7 @@ model ProductionBatch {
   id                      String                @id @default(uuid()) @db.Uuid
   businessId              String                @db.Uuid
   storeId                 String                @db.Uuid
-  menuItemId              String                @db.Uuid
+  menuItemId              String?               @db.Uuid
   recipeId                String                @db.Uuid
   producedInventoryItemId String                @db.Uuid
   createdByUserId         String                @db.Uuid
@@ -371,6 +379,7 @@ model ProductionBatch {
   batchDate               DateTime
   plannedOutputQuantity   Decimal?              @db.Decimal(18,4)
   actualOutputQuantity    Decimal               @db.Decimal(18,4)
+  outputVarianceQuantity  Decimal               @default(0) @db.Decimal(18,4)
   status                  ProductionBatchStatus @default(PLANNED)
   notes                   String?               @db.Text
   createdAt               DateTime              @default(now())
@@ -378,7 +387,7 @@ model ProductionBatch {
 
   business              Business                    @relation(fields: [businessId], references: [id], onDelete: Restrict)
   store                 Store                       @relation(fields: [storeId], references: [id], onDelete: Restrict)
-  menuItem              MenuItem                    @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
+  menuItem              MenuItem?                   @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
   recipe                Recipe                      @relation(fields: [recipeId], references: [id], onDelete: Restrict)
   producedInventoryItem InventoryItem               @relation("ProductionBatchOutputInventoryItem", fields: [producedInventoryItemId], references: [id], onDelete: Restrict)
   createdByUser         User                        @relation("ProductionBatchCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)

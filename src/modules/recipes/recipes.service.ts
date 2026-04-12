@@ -128,7 +128,7 @@ export class RecipesService {
         deletedAt: query.includeArchived ? undefined : null,
       },
       include: recipeInclude,
-      orderBy: [{ menuItemId: 'asc' }, { version: 'desc' }],
+      orderBy: [{ name: 'asc' }, { version: 'desc' }],
     });
 
     return recipes.map((recipe) => this.serializeRecipe(recipe));
@@ -147,7 +147,9 @@ export class RecipesService {
 
     try {
       return await this.prisma.$transaction(async (tx) => {
-        const menuItem = await this.findMenuItemOrThrow(tx, user.businessId, dto.menuItemId);
+        const menuItem = dto.menuItemId
+          ? await this.findMenuItemOrThrow(tx, user.businessId, dto.menuItemId)
+          : null;
         const producedInventoryItem = await tx.inventoryItem.findFirst({
           where: {
             id: dto.producedInventoryItemId,
@@ -161,8 +163,22 @@ export class RecipesService {
           throw new NotFoundException('Produced inventory item not found.');
         }
 
-        if (producedInventoryItem.itemType !== InventoryItemType.FINISHED_GOOD) {
-          throw new BadRequestException('producedInventoryItemId must reference a FINISHED_GOOD inventory item.');
+        if (
+          producedInventoryItem.itemType !== InventoryItemType.FINISHED_GOOD &&
+          producedInventoryItem.itemType !== InventoryItemType.INTERMEDIATE
+        ) {
+          throw new BadRequestException(
+            'producedInventoryItemId must reference a FINISHED_GOOD or INTERMEDIATE inventory item.',
+          );
+        }
+
+        if (
+          menuItem &&
+          producedInventoryItem.itemType !== InventoryItemType.FINISHED_GOOD
+        ) {
+          throw new BadRequestException(
+            'A sellable product can only be linked to a FINISHED_GOOD output item.',
+          );
         }
 
         const ingredients = await tx.inventoryItem.findMany({
@@ -181,10 +197,11 @@ export class RecipesService {
         ingredients.forEach((ingredient) => {
           if (
             ingredient.itemType !== InventoryItemType.RAW_MATERIAL &&
-            ingredient.itemType !== InventoryItemType.PACKAGING
+            ingredient.itemType !== InventoryItemType.PACKAGING &&
+            ingredient.itemType !== InventoryItemType.INTERMEDIATE
           ) {
             throw new BadRequestException(
-              'Recipe ingredients must be RAW_MATERIAL or PACKAGING inventory items.',
+              'Recipe inputs must be RAW_MATERIAL, PACKAGING, or INTERMEDIATE inventory items.',
             );
           }
         });
@@ -192,7 +209,7 @@ export class RecipesService {
         const latestRecipe = await tx.recipe.findFirst({
           where: {
             businessId: user.businessId,
-            menuItemId: menuItem.id,
+            producedInventoryItemId: producedInventoryItem.id,
           },
           orderBy: { version: 'desc' },
           select: { version: true },
@@ -201,11 +218,30 @@ export class RecipesService {
         const existingLiveRecipe = await tx.recipe.findFirst({
           where: {
             businessId: user.businessId,
-            menuItemId: menuItem.id,
+            producedInventoryItemId: producedInventoryItem.id,
             deletedAt: null,
           },
           select: { id: true },
         });
+
+        if (menuItem) {
+          const conflictingActiveMenuItemRecipe = await tx.recipe.findFirst({
+            where: {
+              businessId: user.businessId,
+              menuItemId: menuItem.id,
+              isActive: true,
+              deletedAt: null,
+              producedInventoryItemId: { not: producedInventoryItem.id },
+            },
+            select: { id: true },
+          });
+
+          if (conflictingActiveMenuItemRecipe) {
+            throw new BadRequestException(
+              'The selected sellable product is already linked to another active production definition.',
+            );
+          }
+        }
 
         const nextVersion = latestRecipe ? latestRecipe.version + 1 : 1;
         const shouldActivate = existingLiveRecipe ? false : true;
@@ -213,7 +249,9 @@ export class RecipesService {
         const recipe = await tx.recipe.create({
           data: {
             businessId: user.businessId,
-            menuItemId: menuItem.id,
+            name: dto.name.trim(),
+            definitionType: dto.definitionType,
+            menuItemId: menuItem?.id,
             producedInventoryItemId: producedInventoryItem.id,
             version: nextVersion,
             yieldQuantity: toDecimal(dto.yieldQuantity)!,
@@ -241,19 +279,22 @@ export class RecipesService {
     return this.prisma.$transaction(async (tx) => {
       const recipe = await this.findRecipeOrThrow(tx, user.businessId, recipeId);
 
-      await this.lockRecipesForMenuItem(tx, recipe.menuItemId);
+      await this.lockRecipesForProducedInventoryItem(tx, recipe.producedInventoryItemId);
 
-      if (recipe.menuItem.deletedAt) {
+      if (recipe.menuItem && recipe.menuItem.deletedAt) {
         throw new BadRequestException('Cannot activate a recipe for an archived menu item.');
       }
 
       await tx.recipe.updateMany({
         where: {
           businessId: user.businessId,
-          menuItemId: recipe.menuItemId,
           deletedAt: null,
           id: { not: recipe.id },
           isActive: true,
+          OR: [
+            { producedInventoryItemId: recipe.producedInventoryItemId },
+            ...(recipe.menuItemId ? [{ menuItemId: recipe.menuItemId }] : []),
+          ],
         },
         data: {
           isActive: false,
@@ -295,6 +336,11 @@ export class RecipesService {
 
     return {
       ...recipe,
+      menuItemId: recipe.menuItemId,
+      menuItem: recipe.menuItem ?? {
+        id: recipe.id,
+        name: recipe.name,
+      },
       recipeItems: items,
       computedCostBasis,
       costPerYieldUnit,
@@ -347,12 +393,15 @@ export class RecipesService {
     return recipe;
   }
 
-  private async lockRecipesForMenuItem(db: DbClient, menuItemId: string) {
-    // Serialize activations for the same menu item so two requests cannot leave multiple recipes active.
+  private async lockRecipesForProducedInventoryItem(
+    db: DbClient,
+    producedInventoryItemId: string,
+  ) {
+    // Serialize activations for the same output item so two requests cannot leave multiple definitions active.
     await db.$queryRaw`
       SELECT id
       FROM "Recipe"
-      WHERE "menuItemId" = ${menuItemId}
+      WHERE "producedInventoryItemId" = ${producedInventoryItemId}
       FOR UPDATE
     `;
   }
