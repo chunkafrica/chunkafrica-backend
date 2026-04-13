@@ -69,7 +69,7 @@ export class RecipesService {
 
   async createMenuItem(user: AuthUser, dto: CreateMenuItemDto) {
     try {
-      await this.findFinishedInventoryItemForMenuItemCreate(
+      const inventoryItem = await this.findFinishedInventoryItemForMenuItemCreate(
         this.prisma,
         user.businessId,
         dto.name,
@@ -78,6 +78,7 @@ export class RecipesService {
       return await this.prisma.menuItem.create({
         data: {
           businessId: user.businessId,
+          inventoryItemId: inventoryItem.id,
           name: dto.name.trim(),
           description: dto.description?.trim(),
           defaultPrice: new Prisma.Decimal(dto.defaultPrice),

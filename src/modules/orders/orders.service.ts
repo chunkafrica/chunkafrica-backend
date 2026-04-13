@@ -477,7 +477,7 @@ export class OrdersService {
       );
     }
 
-    await this.findOrCreateSalesFinishedInventoryItemByProductName(
+    const inventoryItem = await this.findOrCreateSalesFinishedInventoryItemByProductName(
       db,
       businessId,
       newProductName,
@@ -487,6 +487,7 @@ export class OrdersService {
     return db.menuItem.create({
       data: {
         businessId,
+        inventoryItemId: inventoryItem.id,
         name: newProductName,
         description: 'Auto-created from Sales Ops.',
         defaultPrice: newProductPrice,
