@@ -265,6 +265,7 @@ export class ReportsService {
           select: {
             id: true,
             name: true,
+            yieldQuantity: true,
           },
         },
         producedInventoryItem: true,
@@ -274,6 +275,39 @@ export class ReportsService {
 
     const completedBatches = batches.filter((batch) => batch.status === ProductionBatchStatus.COMPLETED);
     const outputQuantity = this.sumDecimals(completedBatches.map((batch) => batch.actualOutputQuantity));
+
+    const varianceTable = completedBatches.map((batch) => {
+      const expectedOutputQuantity =
+        batch.plannedOutputQuantity ?? batch.recipe?.yieldQuantity ?? new Prisma.Decimal(0);
+      const outputVarianceQuantity =
+        batch.outputVarianceQuantity ?? batch.actualOutputQuantity.minus(expectedOutputQuantity);
+      const expectedUnitCost = batch.expectedUnitCost ?? new Prisma.Decimal(0);
+      const actualUnitCost = batch.actualUnitCost ?? new Prisma.Decimal(0);
+
+      const outputVariancePercent = expectedOutputQuantity.equals(0)
+        ? null
+        : outputVarianceQuantity.abs().div(expectedOutputQuantity);
+      const costVariancePercent = expectedUnitCost.equals(0)
+        ? null
+        : actualUnitCost.minus(expectedUnitCost).abs().div(expectedUnitCost);
+
+      const isAbnormal =
+        (outputVariancePercent ? outputVariancePercent.greaterThan(0.1) : false) ||
+        (costVariancePercent ? costVariancePercent.greaterThan(0.1) : false);
+
+      return {
+        id: batch.id,
+        outputItemName:
+          batch.menuItem?.name ?? batch.recipe?.name ?? batch.producedInventoryItem.name,
+        producedInventoryItemId: batch.producedInventoryItemId,
+        expectedOutputQuantity,
+        actualOutputQuantity: batch.actualOutputQuantity,
+        varianceQuantity: outputVarianceQuantity,
+        expectedUnitCost,
+        actualUnitCost,
+        isAbnormal,
+      };
+    });
 
     const topProducedItems = Array.from(
       completedBatches.reduce((accumulator, batch) => {
@@ -308,6 +342,7 @@ export class ReportsService {
         cancelledBatches: batches.filter((batch) => batch.status === ProductionBatchStatus.CANCELLED).length,
         totalOutputQuantity: outputQuantity,
       },
+      varianceTable,
       topProducedItems,
       recentBatches: batches.slice(0, 10).map((batch) => ({
         ...batch,

@@ -249,6 +249,7 @@ model InventoryItem {
   stockMovements           StockMovement[]
   recipeIngredients        RecipeItem[]                @relation("RecipeIngredientInventoryItem")
   recipeOutputs            Recipe[]                    @relation("RecipeOutputInventoryItem")
+  menuItem                 MenuItem?
   productionBatchIngredients ProductionBatchIngredient[] @relation("ProductionBatchIngredientInventoryItem")
   producedBatches          ProductionBatch[]           @relation("ProductionBatchOutputInventoryItem")
   wasteLogs                WasteLog[]
@@ -263,6 +264,7 @@ model InventoryItem {
 model MenuItem {
   id           String   @id @default(uuid()) @db.Uuid
   businessId   String   @db.Uuid
+  inventoryItemId String @db.Uuid
   name         String
   description  String?  @db.Text
   defaultPrice Decimal  @db.Decimal(18,4)
@@ -272,12 +274,15 @@ model MenuItem {
   deletedAt    DateTime?
 
   business          Business          @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  inventoryItem     InventoryItem     @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
   recipes           Recipe[]
   salesOrderItems   SalesOrderItem[]
   productionBatches ProductionBatch[]
 
   @@unique([businessId, name])
+  @@unique([inventoryItemId])
   @@index([businessId, deletedAt])
+  @@index([businessId, inventoryItemId])
 }
 
 model Recipe {
@@ -380,6 +385,10 @@ model ProductionBatch {
   plannedOutputQuantity   Decimal?              @db.Decimal(18,4)
   actualOutputQuantity    Decimal               @db.Decimal(18,4)
   outputVarianceQuantity  Decimal               @default(0) @db.Decimal(18,4)
+  expectedTotalCost       Decimal               @default(0) @db.Decimal(18,4)
+  expectedUnitCost        Decimal               @default(0) @db.Decimal(18,4)
+  actualTotalCost         Decimal               @default(0) @db.Decimal(18,4)
+  actualUnitCost          Decimal               @default(0) @db.Decimal(18,4)
   status                  ProductionBatchStatus @default(PLANNED)
   notes                   String?               @db.Text
   createdAt               DateTime              @default(now())
@@ -408,6 +417,9 @@ model ProductionBatchIngredient {
   expectedQuantity  Decimal  @db.Decimal(18,4)
   actualQuantity    Decimal  @db.Decimal(18,4)
   varianceQuantity  Decimal  @db.Decimal(18,4)
+  unitCostSnapshot  Decimal  @default(0) @db.Decimal(18,4)
+  expectedCost      Decimal  @default(0) @db.Decimal(18,4)
+  actualCost        Decimal  @default(0) @db.Decimal(18,4)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
@@ -670,6 +682,8 @@ model StockMovement {
   createdByUserId             String            @db.Uuid
   movementType                StockMovementType
   quantityChange              Decimal           @db.Decimal(18,4)
+  unitCostSnapshot            Decimal?          @db.Decimal(18,4)
+  totalCostSnapshot           Decimal?          @db.Decimal(18,4)
   occurredAt                  DateTime
   notes                       String?           @db.Text
   stockInItemId               String?           @unique @db.Uuid

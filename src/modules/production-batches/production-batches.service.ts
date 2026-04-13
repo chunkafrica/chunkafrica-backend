@@ -146,6 +146,15 @@ export class ProductionBatchesService {
         dto.batchNumber,
       );
 
+      const expectedOutputQuantity =
+        dto.plannedOutputQuantity !== undefined
+          ? toDecimal(dto.plannedOutputQuantity)!
+          : recipe.yieldQuantity;
+      const { expectedTotalCost, expectedUnitCost } = this.computeExpectedCostsFromRecipe(
+        recipe,
+        expectedOutputQuantity,
+      );
+
       const createdBatch = await tx.productionBatch.create({
         data: {
           businessId: user.businessId,
@@ -157,12 +166,13 @@ export class ProductionBatchesService {
           batchNumber,
           recipeVersionUsed: recipe.version,
           batchDate: dto.batchDate,
-          plannedOutputQuantity:
-            dto.plannedOutputQuantity !== undefined
-              ? toDecimal(dto.plannedOutputQuantity)
-              : recipe.yieldQuantity,
+          plannedOutputQuantity: expectedOutputQuantity,
           actualOutputQuantity: new Prisma.Decimal(0),
           outputVarianceQuantity: new Prisma.Decimal(0),
+          expectedTotalCost,
+          expectedUnitCost,
+          actualTotalCost: new Prisma.Decimal(0),
+          actualUnitCost: new Prisma.Decimal(0),
           status: ProductionBatchStatus.PLANNED,
           notes: dto.notes?.trim(),
         },
@@ -189,6 +199,7 @@ export class ProductionBatchesService {
       let nextRecipeId = batch.recipeId;
       let nextProducedInventoryItemId = batch.producedInventoryItemId;
       let nextRecipeVersionUsed = batch.recipeVersionUsed;
+      let nextRecipe = batch.recipe;
 
       if (dto.recipeId) {
         nextRecipeId = dto.recipeId;
@@ -202,6 +213,7 @@ export class ProductionBatchesService {
         nextMenuItemId = recipe.menuItemId;
         nextProducedInventoryItemId = recipe.producedInventoryItemId;
         nextRecipeVersionUsed = recipe.version;
+        nextRecipe = recipe;
       }
 
       const nextBatchNumber = dto.batchNumber
@@ -213,6 +225,22 @@ export class ProductionBatchesService {
             batch.id,
           )
         : batch.batchNumber;
+
+      let expectedTotalCostUpdate: Prisma.Decimal | undefined;
+      let expectedUnitCostUpdate: Prisma.Decimal | undefined;
+
+      if (dto.plannedOutputQuantity !== undefined || dto.recipeId) {
+        const expectedOutputQuantity =
+          dto.plannedOutputQuantity !== undefined
+            ? toDecimal(dto.plannedOutputQuantity)!
+            : batch.plannedOutputQuantity ?? nextRecipe.yieldQuantity;
+        const expectedCosts = this.computeExpectedCostsFromRecipe(
+          nextRecipe,
+          expectedOutputQuantity,
+        );
+        expectedTotalCostUpdate = expectedCosts.expectedTotalCost;
+        expectedUnitCostUpdate = expectedCosts.expectedUnitCost;
+      }
 
       const updatedBatch = await tx.productionBatch.update({
         where: { id: batch.id },
@@ -226,6 +254,8 @@ export class ProductionBatchesService {
             dto.plannedOutputQuantity !== undefined
               ? toDecimal(dto.plannedOutputQuantity)
               : undefined,
+          expectedTotalCost: expectedTotalCostUpdate,
+          expectedUnitCost: expectedUnitCostUpdate,
           batchNumber: nextBatchNumber,
           notes: dto.notes?.trim(),
         },
@@ -307,6 +337,7 @@ export class ProductionBatchesService {
           .div(recipe.yieldQuantity);
         const actualQuantity = ingredientOverrides.get(item.inventoryItemId) ?? expectedQuantity;
         const varianceQuantity = actualQuantity.minus(expectedQuantity);
+        const defaultCostPerUnit = item.inventoryItem.defaultCostPerUnit ?? new Prisma.Decimal(0);
 
         return {
           inventoryItemId: item.inventoryItemId,
@@ -314,16 +345,57 @@ export class ProductionBatchesService {
           expectedQuantity,
           actualQuantity,
           varianceQuantity,
+          defaultCostPerUnit,
         };
       });
 
-      const groupedBalances = usageLines.length
+      const costSnapshots = usageLines.length
+        ? await tx.stockMovement.findMany({
+            where: {
+              businessId: user.businessId,
+              storeId,
+              inventoryItemId: { in: usageLines.map((line) => line.inventoryItemId) },
+              occurredAt: { lte: completedAt },
+              unitCostSnapshot: { not: null },
+            },
+            select: {
+              inventoryItemId: true,
+              unitCostSnapshot: true,
+              occurredAt: true,
+              createdAt: true,
+            },
+            orderBy: [{ occurredAt: 'desc' }, { createdAt: 'desc' }],
+          })
+        : [];
+
+      const costSnapshotMap = new Map<string, Prisma.Decimal>();
+      for (const snapshot of costSnapshots) {
+        if (!costSnapshotMap.has(snapshot.inventoryItemId) && snapshot.unitCostSnapshot) {
+          costSnapshotMap.set(snapshot.inventoryItemId, snapshot.unitCostSnapshot);
+        }
+      }
+
+      const costedUsageLines = usageLines.map((line) => {
+        const unitCostSnapshot =
+          costSnapshotMap.get(line.inventoryItemId) ?? line.defaultCostPerUnit;
+        const expectedCost = line.expectedQuantity.mul(unitCostSnapshot);
+        const actualCost = line.actualQuantity.mul(unitCostSnapshot);
+
+        return {
+          ...line,
+          unitCostSnapshot,
+          expectedCost,
+          actualCost,
+        };
+      });
+
+      const groupedBalances = costedUsageLines.length
         ? await tx.stockMovement.groupBy({
             by: ['inventoryItemId'],
             where: {
               businessId: user.businessId,
               storeId,
-              inventoryItemId: { in: usageLines.map((line) => line.inventoryItemId) },
+              inventoryItemId: { in: costedUsageLines.map((line) => line.inventoryItemId) },
               occurredAt: { lte: completedAt },
             },
             _sum: {
@@ -339,7 +411,7 @@ export class ProductionBatchesService {
         ]),
       );
 
-      const insufficientIngredients = usageLines.filter((line) => {
+      const insufficientIngredients = costedUsageLines.filter((line) => {
         const onHand = balanceMap.get(line.inventoryItemId) ?? new Prisma.Decimal(0);
         return line.actualQuantity.greaterThan(onHand);
       });
@@ -355,7 +427,7 @@ export class ProductionBatchesService {
         throw new BadRequestException(`Insufficient stock for production completion: ${detail}`);
       }
 
-      for (const line of usageLines) {
+      for (const line of costedUsageLines) {
         const ingredientRecord = await tx.productionBatchIngredient.create({
           data: {
             productionBatchId: batch.id,
@@ -363,6 +435,9 @@ export class ProductionBatchesService {
             expectedQuantity: line.expectedQuantity,
             actualQuantity: line.actualQuantity,
             varianceQuantity: line.varianceQuantity,
+            unitCostSnapshot: line.unitCostSnapshot,
+            expectedCost: line.expectedCost,
+            actualCost: line.actualCost,
           },
         });
 
@@ -374,12 +449,29 @@ export class ProductionBatchesService {
             createdByUserId: user.userId,
             movementType: StockMovementType.PRODUCTION_USE,
             quantityChange: line.actualQuantity.negated(),
+            unitCostSnapshot: line.unitCostSnapshot,
+            totalCostSnapshot: line.actualCost,
             occurredAt: completedAt,
             notes: `Production input for batch ${batch.batchNumber ?? batch.id}`,
             productionBatchIngredientId: ingredientRecord.id,
           },
         });
       }
+
+      const expectedTotalCost = costedUsageLines.reduce(
+        (total, line) => total.plus(line.expectedCost),
+        new Prisma.Decimal(0),
+      );
+      const actualTotalCost = costedUsageLines.reduce(
+        (total, line) => total.plus(line.actualCost),
+        new Prisma.Decimal(0),
+      );
+      const expectedUnitCost = expectedOutputQuantity.equals(0)
+        ? new Prisma.Decimal(0)
+        : expectedTotalCost.div(expectedOutputQuantity);
+      const actualUnitCost = outputQuantity.equals(0)
+        ? new Prisma.Decimal(0)
+        : actualTotalCost.div(outputQuantity);
 
       await tx.stockMovement.create({
         data: {
@@ -389,6 +481,8 @@ export class ProductionBatchesService {
           createdByUserId: user.userId,
           movementType: StockMovementType.PRODUCTION_OUTPUT,
           quantityChange: outputQuantity,
+          unitCostSnapshot: actualUnitCost,
+          totalCostSnapshot: actualTotalCost,
           occurredAt: completedAt,
           notes: `Production output for batch ${batch.batchNumber ?? batch.id}`,
           productionBatchId: batch.id,
@@ -400,6 +494,10 @@ export class ProductionBatchesService {
         data: {
           actualOutputQuantity: outputQuantity,
           outputVarianceQuantity,
+          expectedTotalCost,
+          expectedUnitCost,
+          actualTotalCost,
+          actualUnitCost,
           recipeVersionUsed: recipe.version,
           producedInventoryItemId: recipe.producedInventoryItemId,
           menuItemId: recipe.menuItemId,
@@ -444,6 +542,10 @@ export class ProductionBatchesService {
       },
       outputVarianceQuantity: batch.outputVarianceQuantity ?? new Prisma.Decimal(0),
       expectedOutputQuantity: batch.plannedOutputQuantity ?? batch.recipe.yieldQuantity,
+      expectedTotalCost: batch.expectedTotalCost ?? new Prisma.Decimal(0),
+      expectedUnitCost: batch.expectedUnitCost ?? new Prisma.Decimal(0),
+      actualTotalCost: batch.actualTotalCost ?? new Prisma.Decimal(0),
+      actualUnitCost: batch.actualUnitCost ?? new Prisma.Decimal(0),
     };
   }
 
@@ -459,6 +561,10 @@ export class ProductionBatchesService {
       },
       outputVarianceQuantity: batch.outputVarianceQuantity ?? new Prisma.Decimal(0),
       expectedOutputQuantity: batch.plannedOutputQuantity ?? batch.recipe.yieldQuantity,
+      expectedTotalCost: batch.expectedTotalCost ?? new Prisma.Decimal(0),
+      expectedUnitCost: batch.expectedUnitCost ?? new Prisma.Decimal(0),
+      actualTotalCost: batch.actualTotalCost ?? new Prisma.Decimal(0),
+      actualUnitCost: batch.actualUnitCost ?? new Prisma.Decimal(0),
     };
   }
 
@@ -550,6 +656,29 @@ export class ProductionBatchesService {
         'Only PLANNED or IN_PROGRESS batches can be completed.',
       );
     }
+  }
+
+  private computeExpectedCostsFromRecipe(
+    recipe: ActiveRecipeForBatch,
+    expectedOutputQuantity: Prisma.Decimal,
+  ) {
+    const zero = new Prisma.Decimal(0);
+
+    if (expectedOutputQuantity.lessThanOrEqualTo(0)) {
+      return { expectedTotalCost: zero, expectedUnitCost: zero };
+    }
+
+    const expectedTotalCost = recipe.recipeItems.reduce((total, item) => {
+      const unitCost = item.inventoryItem.defaultCostPerUnit ?? zero;
+      const expectedQuantity = item.quantityRequired
+        .mul(expectedOutputQuantity)
+        .div(recipe.yieldQuantity);
+      return total.plus(unitCost.mul(expectedQuantity));
+    }, new Prisma.Decimal(0));
+
+    const expectedUnitCost = expectedTotalCost.div(expectedOutputQuantity);
+
+    return { expectedTotalCost, expectedUnitCost };
   }
 
   private async resolveBatchNumber(

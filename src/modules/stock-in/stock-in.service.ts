@@ -154,6 +154,8 @@ export class StockInService {
             createdByUserId: user.userId,
             movementType: StockMovementType.STOCK_IN,
             quantityChange: toDecimal(item.quantity)!,
+            unitCostSnapshot: toDecimal(item.unitCost)!,
+            totalCostSnapshot: totalCost,
             occurredAt: dto.receivedAt,
             notes: dto.notes?.trim() ?? `Stock-in posted from ${stockInRecord.id}`,
             stockInItemId: stockInItem.id,
