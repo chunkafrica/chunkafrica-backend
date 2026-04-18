@@ -90,6 +90,18 @@ type ActiveRecipeForBatch = Prisma.RecipeGetPayload<{
   };
 }>;
 type DbClient = PrismaService | Prisma.TransactionClient;
+type ExpectedCostBasisSource =
+  | 'STORE_LATEST_SNAPSHOT'
+  | 'INVENTORY_DEFAULT_FALLBACK'
+  | 'MIXED_SNAPSHOT_AND_DEFAULT'
+  | 'NO_INPUT_LINES';
+
+type PlannedBatchIngredientLine = {
+  inventoryItemId: string;
+  expectedQuantity: Prisma.Decimal;
+  expectedUnitCost: Prisma.Decimal;
+  expectedCost: Prisma.Decimal;
+};
 
 @Injectable()
 export class ProductionBatchesService {
@@ -150,8 +162,16 @@ export class ProductionBatchesService {
         dto.plannedOutputQuantity !== undefined
           ? toDecimal(dto.plannedOutputQuantity)!
           : recipe.yieldQuantity;
-      const { expectedTotalCost, expectedUnitCost } = this.computeExpectedCostsFromRecipe(
+      const plannedIngredients = await this.buildPlannedIngredientCostLines(
+        tx,
+        user.businessId,
+        storeId,
         recipe,
+        expectedOutputQuantity,
+        dto.batchDate,
+      );
+      const { expectedTotalCost, expectedUnitCost } = this.computeExpectedCostsFromPlannedLines(
+        plannedIngredients.lines,
         expectedOutputQuantity,
       );
 
@@ -171,6 +191,8 @@ export class ProductionBatchesService {
           outputVarianceQuantity: new Prisma.Decimal(0),
           expectedTotalCost,
           expectedUnitCost,
+          expectedCostBasisSource: plannedIngredients.basisSource,
+          expectedCostBasisAt: dto.batchDate,
           actualTotalCost: new Prisma.Decimal(0),
           actualUnitCost: new Prisma.Decimal(0),
           status: ProductionBatchStatus.PLANNED,
@@ -179,7 +201,27 @@ export class ProductionBatchesService {
         include: batchDetailInclude,
       });
 
-      return this.serializeBatchDetail(createdBatch);
+      if (plannedIngredients.lines.length > 0) {
+        await tx.productionBatchIngredient.createMany({
+          data: plannedIngredients.lines.map((line) => ({
+            productionBatchId: createdBatch.id,
+            inventoryItemId: line.inventoryItemId,
+            expectedQuantity: line.expectedQuantity,
+            actualQuantity: new Prisma.Decimal(0),
+            varianceQuantity: new Prisma.Decimal(0),
+            unitCostSnapshot: line.expectedUnitCost,
+            expectedCost: line.expectedCost,
+            actualCost: new Prisma.Decimal(0),
+          })),
+        });
+      }
+
+      const hydratedBatch = await tx.productionBatch.findUniqueOrThrow({
+        where: { id: createdBatch.id },
+        include: batchDetailInclude,
+      });
+
+      return this.serializeBatchDetail(hydratedBatch);
     });
   }
 
@@ -228,18 +270,33 @@ export class ProductionBatchesService {
 
       let expectedTotalCostUpdate: Prisma.Decimal | undefined;
       let expectedUnitCostUpdate: Prisma.Decimal | undefined;
+      let expectedCostBasisSourceUpdate: ExpectedCostBasisSource | undefined;
+      let expectedCostBasisAtUpdate: Date | undefined;
+      let plannedIngredientLinesToPersist: PlannedBatchIngredientLine[] | null = null;
 
       if (dto.plannedOutputQuantity !== undefined || dto.recipeId) {
         const expectedOutputQuantity =
           dto.plannedOutputQuantity !== undefined
             ? toDecimal(dto.plannedOutputQuantity)!
             : batch.plannedOutputQuantity ?? nextRecipe.yieldQuantity;
-        const expectedCosts = this.computeExpectedCostsFromRecipe(
+        const planningAsOf = dto.batchDate ?? batch.batchDate;
+        const plannedIngredients = await this.buildPlannedIngredientCostLines(
+          tx,
+          user.businessId,
+          storeId,
           nextRecipe,
+          expectedOutputQuantity,
+          planningAsOf,
+        );
+        const expectedCosts = this.computeExpectedCostsFromPlannedLines(
+          plannedIngredients.lines,
           expectedOutputQuantity,
         );
         expectedTotalCostUpdate = expectedCosts.expectedTotalCost;
         expectedUnitCostUpdate = expectedCosts.expectedUnitCost;
+        expectedCostBasisSourceUpdate = plannedIngredients.basisSource;
+        expectedCostBasisAtUpdate = planningAsOf;
+        plannedIngredientLinesToPersist = plannedIngredients.lines;
       }
 
       const updatedBatch = await tx.productionBatch.update({
@@ -256,13 +313,51 @@ export class ProductionBatchesService {
               : undefined,
           expectedTotalCost: expectedTotalCostUpdate,
           expectedUnitCost: expectedUnitCostUpdate,
+          expectedCostBasisSource: expectedCostBasisSourceUpdate,
+          expectedCostBasisAt: expectedCostBasisAtUpdate,
           batchNumber: nextBatchNumber,
           notes: dto.notes?.trim(),
         },
         include: batchDetailInclude,
       });
 
-      return this.serializeBatchDetail(updatedBatch);
+      if (plannedIngredientLinesToPersist !== null) {
+        const hasPostedIngredientMovement = updatedBatch.ingredients.some(
+          (ingredient) => ingredient.stockMovement !== null,
+        );
+
+        if (hasPostedIngredientMovement || updatedBatch.outputStockMovement) {
+          throw new ConflictException(
+            'Cannot refresh planned ingredient costs because this batch already has posted production records.',
+          );
+        }
+
+        await tx.productionBatchIngredient.deleteMany({
+          where: { productionBatchId: updatedBatch.id },
+        });
+
+        if (plannedIngredientLinesToPersist.length > 0) {
+          await tx.productionBatchIngredient.createMany({
+            data: plannedIngredientLinesToPersist.map((line) => ({
+              productionBatchId: updatedBatch.id,
+              inventoryItemId: line.inventoryItemId,
+              expectedQuantity: line.expectedQuantity,
+              actualQuantity: new Prisma.Decimal(0),
+              varianceQuantity: new Prisma.Decimal(0),
+              unitCostSnapshot: line.expectedUnitCost,
+              expectedCost: line.expectedCost,
+              actualCost: new Prisma.Decimal(0),
+            })),
+          });
+        }
+      }
+
+      const refreshedBatch = await tx.productionBatch.findUniqueOrThrow({
+        where: { id: updatedBatch.id },
+        include: batchDetailInclude,
+      });
+
+      return this.serializeBatchDetail(refreshedBatch);
     });
   }
 
@@ -295,7 +390,7 @@ export class ProductionBatchesService {
       const batch = await this.findBatchOrThrow(tx, user.businessId, storeId, batchId);
       this.assertBatchCompletable(batch.status);
 
-      if (batch.ingredients.length > 0 || batch.outputStockMovement) {
+      if (batch.outputStockMovement || batch.ingredients.some((ingredient) => ingredient.stockMovement)) {
         throw new ConflictException('This batch already has posted production records.');
       }
 
@@ -312,6 +407,7 @@ export class ProductionBatchesService {
       const outputQuantity = toDecimal(dto.actualOutputQuantity)!;
       const outputVarianceQuantity = outputQuantity.minus(expectedOutputQuantity);
       const completedAt = dto.completedAt;
+      const plannedAsOf = batch.expectedCostBasisAt ?? batch.batchDate;
       const ingredientOverrides = new Map<string, Prisma.Decimal>();
       const overrideIds = new Set<string>();
 
@@ -331,21 +427,49 @@ export class ProductionBatchesService {
         }
       }
 
+      const plannedCostLines = await this.buildPlannedIngredientCostLines(
+        tx,
+        user.businessId,
+        storeId,
+        recipe,
+        expectedOutputQuantity,
+        plannedAsOf,
+      );
+
+      const plannedIngredientMap = new Map(
+        batch.ingredients.map((ingredient) => [ingredient.inventoryItemId, ingredient]),
+      );
+
       const usageLines = recipe.recipeItems.map((item) => {
-        const expectedQuantity = item.quantityRequired
+        const expectedQuantityFromRecipe = item.quantityRequired
           .mul(expectedOutputQuantity)
           .div(recipe.yieldQuantity);
+        const persistedPlannedLine = plannedIngredientMap.get(item.inventoryItemId);
+        const generatedPlannedLine = plannedCostLines.lines.find(
+          (line) => line.inventoryItemId === item.inventoryItemId,
+        );
+
+        const expectedQuantity = persistedPlannedLine?.expectedQuantity ?? expectedQuantityFromRecipe;
+        const expectedUnitCost =
+          persistedPlannedLine?.unitCostSnapshot ??
+          generatedPlannedLine?.expectedUnitCost ??
+          new Prisma.Decimal(0);
+        const expectedCost =
+          persistedPlannedLine?.expectedCost ??
+          generatedPlannedLine?.expectedCost ??
+          expectedQuantity.mul(expectedUnitCost);
         const actualQuantity = ingredientOverrides.get(item.inventoryItemId) ?? expectedQuantity;
         const varianceQuantity = actualQuantity.minus(expectedQuantity);
-        const defaultCostPerUnit = item.inventoryItem.defaultCostPerUnit ?? new Prisma.Decimal(0);
 
         return {
           inventoryItemId: item.inventoryItemId,
           inventoryItemName: item.inventoryItem.name,
           expectedQuantity,
+          expectedUnitCost,
+          expectedCost,
           actualQuantity,
           varianceQuantity,
-          defaultCostPerUnit,
+          defaultCostPerUnit: item.inventoryItem.defaultCostPerUnit ?? new Prisma.Decimal(0),
         };
       });
 
@@ -376,15 +500,13 @@ export class ProductionBatchesService {
       }
 
       const costedUsageLines = usageLines.map((line) => {
-        const unitCostSnapshot =
+        const actualUnitCostSnapshot =
           costSnapshotMap.get(line.inventoryItemId) ?? line.defaultCostPerUnit;
-        const expectedCost = line.expectedQuantity.mul(unitCostSnapshot);
-        const actualCost = line.actualQuantity.mul(unitCostSnapshot);
+        const actualCost = line.actualQuantity.mul(actualUnitCostSnapshot);
 
         return {
           ...line,
-          unitCostSnapshot,
-          expectedCost,
+          actualUnitCostSnapshot,
           actualCost,
         };
       });
@@ -428,14 +550,27 @@ export class ProductionBatchesService {
       }
 
       for (const line of costedUsageLines) {
-        const ingredientRecord = await tx.productionBatchIngredient.create({
-          data: {
+        const ingredientRecord = await tx.productionBatchIngredient.upsert({
+          where: {
+            productionBatchId_inventoryItemId: {
+              productionBatchId: batch.id,
+              inventoryItemId: line.inventoryItemId,
+            },
+          },
+          create: {
             productionBatchId: batch.id,
             inventoryItemId: line.inventoryItemId,
             expectedQuantity: line.expectedQuantity,
             actualQuantity: line.actualQuantity,
             varianceQuantity: line.varianceQuantity,
-            unitCostSnapshot: line.unitCostSnapshot,
+            unitCostSnapshot: line.expectedUnitCost,
+            expectedCost: line.expectedCost,
+            actualCost: line.actualCost,
+          },
+          update: {
+            expectedQuantity: line.expectedQuantity,
+            actualQuantity: line.actualQuantity,
+            varianceQuantity: line.varianceQuantity,
             expectedCost: line.expectedCost,
             actualCost: line.actualCost,
           },
@@ -449,7 +584,7 @@ export class ProductionBatchesService {
             createdByUserId: user.userId,
             movementType: StockMovementType.PRODUCTION_USE,
             quantityChange: line.actualQuantity.negated(),
-            unitCostSnapshot: line.unitCostSnapshot,
+            unitCostSnapshot: line.actualUnitCostSnapshot,
             totalCostSnapshot: line.actualCost,
             occurredAt: completedAt,
             notes: `Production input for batch ${batch.batchNumber ?? batch.id}`,
@@ -496,6 +631,8 @@ export class ProductionBatchesService {
           outputVarianceQuantity,
           expectedTotalCost,
           expectedUnitCost,
+          expectedCostBasisSource: batch.expectedCostBasisSource,
+          expectedCostBasisAt: plannedAsOf,
           actualTotalCost,
           actualUnitCost,
           recipeVersionUsed: recipe.version,
@@ -544,6 +681,8 @@ export class ProductionBatchesService {
       expectedOutputQuantity: batch.plannedOutputQuantity ?? batch.recipe.yieldQuantity,
       expectedTotalCost: batch.expectedTotalCost ?? new Prisma.Decimal(0),
       expectedUnitCost: batch.expectedUnitCost ?? new Prisma.Decimal(0),
+      expectedCostBasisSource: batch.expectedCostBasisSource,
+      expectedCostBasisAt: batch.expectedCostBasisAt,
       actualTotalCost: batch.actualTotalCost ?? new Prisma.Decimal(0),
       actualUnitCost: batch.actualUnitCost ?? new Prisma.Decimal(0),
     };
@@ -563,6 +702,8 @@ export class ProductionBatchesService {
       expectedOutputQuantity: batch.plannedOutputQuantity ?? batch.recipe.yieldQuantity,
       expectedTotalCost: batch.expectedTotalCost ?? new Prisma.Decimal(0),
       expectedUnitCost: batch.expectedUnitCost ?? new Prisma.Decimal(0),
+      expectedCostBasisSource: batch.expectedCostBasisSource,
+      expectedCostBasisAt: batch.expectedCostBasisAt,
       actualTotalCost: batch.actualTotalCost ?? new Prisma.Decimal(0),
       actualUnitCost: batch.actualUnitCost ?? new Prisma.Decimal(0),
     };
@@ -658,23 +799,101 @@ export class ProductionBatchesService {
     }
   }
 
-  private computeExpectedCostsFromRecipe(
+  private async buildPlannedIngredientCostLines(
+    db: DbClient,
+    businessId: string,
+    storeId: string,
     recipe: ActiveRecipeForBatch,
     expectedOutputQuantity: Prisma.Decimal,
+    asOf: Date,
   ) {
     const zero = new Prisma.Decimal(0);
 
     if (expectedOutputQuantity.lessThanOrEqualTo(0)) {
-      return { expectedTotalCost: zero, expectedUnitCost: zero };
+      return {
+        lines: [] as PlannedBatchIngredientLine[],
+        basisSource: 'NO_INPUT_LINES' as ExpectedCostBasisSource,
+      };
     }
 
-    const expectedTotalCost = recipe.recipeItems.reduce((total, item) => {
-      const unitCost = item.inventoryItem.defaultCostPerUnit ?? zero;
+    const ingredientIds = recipe.recipeItems.map((item) => item.inventoryItemId);
+    const snapshots = ingredientIds.length
+      ? await db.stockMovement.findMany({
+          where: {
+            businessId,
+            storeId,
+            inventoryItemId: { in: ingredientIds },
+            occurredAt: { lte: asOf },
+            unitCostSnapshot: { not: null },
+          },
+          select: {
+            inventoryItemId: true,
+            unitCostSnapshot: true,
+            occurredAt: true,
+            createdAt: true,
+          },
+          orderBy: [{ occurredAt: 'desc' }, { createdAt: 'desc' }],
+        })
+      : [];
+
+    const snapshotMap = new Map<string, Prisma.Decimal>();
+    for (const snapshot of snapshots) {
+      if (!snapshotMap.has(snapshot.inventoryItemId) && snapshot.unitCostSnapshot) {
+        snapshotMap.set(snapshot.inventoryItemId, snapshot.unitCostSnapshot);
+      }
+    }
+
+    let usedSnapshot = false;
+    let usedDefaultFallback = false;
+
+    const lines = recipe.recipeItems.map((item) => {
       const expectedQuantity = item.quantityRequired
         .mul(expectedOutputQuantity)
         .div(recipe.yieldQuantity);
-      return total.plus(unitCost.mul(expectedQuantity));
-    }, new Prisma.Decimal(0));
+      const snapshotUnitCost = snapshotMap.get(item.inventoryItemId);
+      const expectedUnitCost = snapshotUnitCost ?? item.inventoryItem.defaultCostPerUnit ?? zero;
+
+      if (snapshotUnitCost) {
+        usedSnapshot = true;
+      } else {
+        usedDefaultFallback = true;
+      }
+
+      return {
+        inventoryItemId: item.inventoryItemId,
+        expectedQuantity,
+        expectedUnitCost,
+        expectedCost: expectedQuantity.mul(expectedUnitCost),
+      };
+    });
+
+    let basisSource: ExpectedCostBasisSource = 'NO_INPUT_LINES';
+    if (lines.length > 0) {
+      if (usedSnapshot && usedDefaultFallback) {
+        basisSource = 'MIXED_SNAPSHOT_AND_DEFAULT';
+      } else if (usedSnapshot) {
+        basisSource = 'STORE_LATEST_SNAPSHOT';
+      } else {
+        basisSource = 'INVENTORY_DEFAULT_FALLBACK';
+      }
+    }
+
+    return { lines, basisSource };
+  }
+
+  private computeExpectedCostsFromPlannedLines(
+    lines: PlannedBatchIngredientLine[],
+    expectedOutputQuantity: Prisma.Decimal,
+  ) {
+    const zero = new Prisma.Decimal(0);
+    if (expectedOutputQuantity.lessThanOrEqualTo(0)) {
+      return { expectedTotalCost: zero, expectedUnitCost: zero };
+    }
+
+    const expectedTotalCost = lines.reduce(
+      (total, line) => total.plus(line.expectedCost),
+      new Prisma.Decimal(0),
+    );
 
     const expectedUnitCost = expectedTotalCost.div(expectedOutputQuantity);
 

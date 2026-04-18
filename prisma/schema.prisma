@@ -387,6 +387,8 @@ model ProductionBatch {
   outputVarianceQuantity  Decimal               @default(0) @db.Decimal(18,4)
   expectedTotalCost       Decimal               @default(0) @db.Decimal(18,4)
   expectedUnitCost        Decimal               @default(0) @db.Decimal(18,4)
+  expectedCostBasisSource String?
+  expectedCostBasisAt     DateTime?
   actualTotalCost         Decimal               @default(0) @db.Decimal(18,4)
   actualUnitCost          Decimal               @default(0) @db.Decimal(18,4)
   status                  ProductionBatchStatus @default(PLANNED)

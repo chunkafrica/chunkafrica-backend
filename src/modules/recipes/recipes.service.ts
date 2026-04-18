@@ -182,6 +182,12 @@ export class RecipesService {
           );
         }
 
+        if (uniqueIngredientIds.has(producedInventoryItem.id)) {
+          throw new BadRequestException(
+            'A production definition cannot consume its own output item as an input.',
+          );
+        }
+
         const ingredients = await tx.inventoryItem.findMany({
           where: {
             businessId: user.businessId,
@@ -247,6 +253,15 @@ export class RecipesService {
         const nextVersion = latestRecipe ? latestRecipe.version + 1 : 1;
         const shouldActivate = existingLiveRecipe ? false : true;
 
+        if (shouldActivate) {
+          await this.assertNoActiveDefinitionCycle(
+            tx,
+            user.businessId,
+            producedInventoryItem.id,
+            Array.from(uniqueIngredientIds),
+          );
+        }
+
         const recipe = await tx.recipe.create({
           data: {
             businessId: user.businessId,
@@ -285,6 +300,18 @@ export class RecipesService {
       if (recipe.menuItem && recipe.menuItem.deletedAt) {
         throw new BadRequestException('Cannot activate a recipe for an archived menu item.');
       }
+
+      await this.assertNoActiveDefinitionCycle(
+        tx,
+        user.businessId,
+        recipe.producedInventoryItemId,
+        recipe.recipeItems.map((item) => item.inventoryItemId),
+        {
+          excludingRecipeIds: [recipe.id],
+          excludingProducedInventoryItemId: recipe.producedInventoryItemId,
+          excludingMenuItemId: recipe.menuItemId ?? null,
+        },
+      );
 
       await tx.recipe.updateMany({
         where: {
@@ -445,6 +472,103 @@ export class RecipesService {
       error.code === 'P2002'
     ) {
       throw new ConflictException(message);
+    }
+  }
+
+  private async assertNoActiveDefinitionCycle(
+    db: DbClient,
+    businessId: string,
+    candidateOutputInventoryItemId: string,
+    candidateInputInventoryItemIds: string[],
+    options?: {
+      excludingRecipeIds?: string[];
+      excludingProducedInventoryItemId?: string;
+      excludingMenuItemId?: string | null;
+    },
+  ) {
+    if (candidateInputInventoryItemIds.includes(candidateOutputInventoryItemId)) {
+      throw new BadRequestException(
+        'A production definition cannot consume its own output item as an input.',
+      );
+    }
+
+    const activeRecipes = await db.recipe.findMany({
+      where: {
+        businessId,
+        deletedAt: null,
+        isActive: true,
+        id: options?.excludingRecipeIds?.length
+          ? { notIn: options.excludingRecipeIds }
+          : undefined,
+        producedInventoryItemId: options?.excludingProducedInventoryItemId
+          ? { not: options.excludingProducedInventoryItemId }
+          : undefined,
+        menuItemId: options?.excludingMenuItemId
+          ? { not: options.excludingMenuItemId }
+          : undefined,
+      },
+      select: {
+        producedInventoryItemId: true,
+        recipeItems: {
+          select: {
+            inventoryItemId: true,
+          },
+        },
+      },
+    });
+
+    const activeOutputs = new Set(activeRecipes.map((recipe) => recipe.producedInventoryItemId));
+    activeOutputs.add(candidateOutputInventoryItemId);
+
+    const adjacency = new Map<string, string[]>();
+
+    for (const activeRecipe of activeRecipes) {
+      adjacency.set(
+        activeRecipe.producedInventoryItemId,
+        activeRecipe.recipeItems
+          .map((item) => item.inventoryItemId)
+          .filter((inventoryItemId) => activeOutputs.has(inventoryItemId)),
+      );
+    }
+
+    adjacency.set(
+      candidateOutputInventoryItemId,
+      candidateInputInventoryItemIds.filter((inventoryItemId) =>
+        activeOutputs.has(inventoryItemId),
+      ),
+    );
+
+    const target = candidateOutputInventoryItemId;
+    const visiting = new Set<string>();
+    const visited = new Set<string>();
+
+    const hasPathToTarget = (node: string): boolean => {
+      if (node === target) {
+        return true;
+      }
+
+      if (visiting.has(node) || visited.has(node)) {
+        return false;
+      }
+
+      visiting.add(node);
+      for (const dependency of adjacency.get(node) ?? []) {
+        if (hasPathToTarget(dependency)) {
+          return true;
+        }
+      }
+      visiting.delete(node);
+      visited.add(node);
+
+      return false;
+    };
+
+    for (const dependency of adjacency.get(target) ?? []) {
+      if (hasPathToTarget(dependency)) {
+        throw new BadRequestException(
+          'Activating this production definition creates a cyclic dependency chain. Remove the cycle and try again.',
+        );
+      }
     }
   }
 }
