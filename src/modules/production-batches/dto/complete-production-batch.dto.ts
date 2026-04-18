@@ -7,6 +7,7 @@ import {
   IsOptional,
   IsPositive,
   IsString,
+  IsIn,
   IsUUID,
   MaxLength,
   ValidateNested,
@@ -23,6 +24,15 @@ export class CompleteProductionBatchIngredientDto {
 }
 
 export class CompleteProductionBatchDto {
+  static readonly varianceReasonCodes = [
+    'yield_loss',
+    'input_overuse',
+    'quality_reject',
+    'overproduction',
+    'process_error',
+    'damaged_output',
+  ] as const;
+
   @Type(() => Date)
   @IsDate()
   completedAt!: Date;
@@ -43,4 +53,9 @@ export class CompleteProductionBatchDto {
   @IsString()
   @MaxLength(1000)
   notes?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(CompleteProductionBatchDto.varianceReasonCodes)
+  varianceReasonCode?: (typeof CompleteProductionBatchDto.varianceReasonCodes)[number];
 }

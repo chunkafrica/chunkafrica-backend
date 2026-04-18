@@ -283,6 +283,9 @@ export class ReportsService {
         batch.outputVarianceQuantity ?? batch.actualOutputQuantity.minus(expectedOutputQuantity);
       const expectedUnitCost = batch.expectedUnitCost ?? new Prisma.Decimal(0);
       const actualUnitCost = batch.actualUnitCost ?? new Prisma.Decimal(0);
+      const expectedTotalCost = batch.expectedTotalCost ?? new Prisma.Decimal(0);
+      const actualTotalCost = batch.actualTotalCost ?? new Prisma.Decimal(0);
+      const costVarianceAmount = actualTotalCost.minus(expectedTotalCost);
 
       const outputVariancePercent = expectedOutputQuantity.equals(0)
         ? null
@@ -303,11 +306,28 @@ export class ReportsService {
         expectedOutputQuantity,
         actualOutputQuantity: batch.actualOutputQuantity,
         varianceQuantity: outputVarianceQuantity,
+        expectedTotalCost,
+        actualTotalCost,
+        costVarianceAmount,
         expectedUnitCost,
         actualUnitCost,
+        varianceReasonCode: batch.varianceReasonCode,
+        openRunDetail: {
+          productionBatchId: batch.id,
+          path: `/production?batchId=${batch.id}`,
+        },
         isAbnormal,
       };
     });
+
+    const rankedVarianceTable = [...varianceTable]
+      .sort((left, right) =>
+        right.costVarianceAmount.abs().comparedTo(left.costVarianceAmount.abs()),
+      )
+      .map((row, index) => ({
+        ...row,
+        costImpactRank: index + 1,
+      }));
 
     const topProducedItems = Array.from(
       completedBatches.reduce((accumulator, batch) => {
@@ -342,7 +362,8 @@ export class ReportsService {
         cancelledBatches: batches.filter((batch) => batch.status === ProductionBatchStatus.CANCELLED).length,
         totalOutputQuantity: outputQuantity,
       },
-      varianceTable,
+      varianceTable: rankedVarianceTable,
+      topCostImpactRuns: rankedVarianceTable.slice(0, 10),
       topProducedItems,
       recentBatches: batches.slice(0, 10).map((batch) => ({
         ...batch,

@@ -41,7 +41,20 @@ const batchDetailInclude = {
   ingredients: {
     include: {
       inventoryItem: true,
-      stockMovement: true,
+      stockMovement: {
+        include: {
+          sourceStockMovement: {
+            include: {
+              productionBatch: {
+                include: {
+                  menuItem: true,
+                  producedInventoryItem: true,
+                },
+              },
+            },
+          },
+        },
+      },
     },
   },
   outputStockMovement: true,
@@ -549,6 +562,33 @@ export class ProductionBatchesService {
         throw new BadRequestException(`Insufficient stock for production completion: ${detail}`);
       }
 
+      const sourceOutputMovements = costedUsageLines.length
+        ? await tx.stockMovement.findMany({
+            where: {
+              businessId: user.businessId,
+              storeId,
+              movementType: StockMovementType.PRODUCTION_OUTPUT,
+              inventoryItemId: { in: costedUsageLines.map((line) => line.inventoryItemId) },
+              quantityChange: { gt: new Prisma.Decimal(0) },
+              occurredAt: { lte: completedAt },
+            },
+            select: {
+              id: true,
+              inventoryItemId: true,
+              occurredAt: true,
+              createdAt: true,
+            },
+            orderBy: [{ occurredAt: 'desc' }, { createdAt: 'desc' }],
+          })
+        : [];
+
+      const sourceOutputMovementMap = new Map<string, string>();
+      for (const sourceMovement of sourceOutputMovements) {
+        if (!sourceOutputMovementMap.has(sourceMovement.inventoryItemId)) {
+          sourceOutputMovementMap.set(sourceMovement.inventoryItemId, sourceMovement.id);
+        }
+      }
+
       for (const line of costedUsageLines) {
         const ingredientRecord = await tx.productionBatchIngredient.upsert({
           where: {
@@ -589,6 +629,7 @@ export class ProductionBatchesService {
             occurredAt: completedAt,
             notes: `Production input for batch ${batch.batchNumber ?? batch.id}`,
             productionBatchIngredientId: ingredientRecord.id,
+            sourceStockMovementId: sourceOutputMovementMap.get(line.inventoryItemId),
           },
         });
       }
@@ -633,6 +674,7 @@ export class ProductionBatchesService {
           expectedUnitCost,
           expectedCostBasisSource: batch.expectedCostBasisSource,
           expectedCostBasisAt: plannedAsOf,
+          varianceReasonCode: dto.varianceReasonCode ?? null,
           actualTotalCost,
           actualUnitCost,
           recipeVersionUsed: recipe.version,

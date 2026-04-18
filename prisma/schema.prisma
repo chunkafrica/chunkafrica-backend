@@ -389,6 +389,7 @@ model ProductionBatch {
   expectedUnitCost        Decimal               @default(0) @db.Decimal(18,4)
   expectedCostBasisSource String?
   expectedCostBasisAt     DateTime?
+  varianceReasonCode      String?
   actualTotalCost         Decimal               @default(0) @db.Decimal(18,4)
   actualUnitCost          Decimal               @default(0) @db.Decimal(18,4)
   status                  ProductionBatchStatus @default(PLANNED)
@@ -694,6 +695,7 @@ model StockMovement {
   wasteLogId                  String?           @unique @db.Uuid
   reconciliationItemId        String?           @unique @db.Uuid
   salesOrderItemId            String?           @unique @db.Uuid
+  sourceStockMovementId       String?           @db.Uuid
   createdAt                   DateTime          @default(now())
   updatedAt                   DateTime          @updatedAt
 
@@ -709,11 +711,14 @@ model StockMovement {
   wasteLog                  WasteLog?                  @relation("WasteLogMovement", fields: [wasteLogId], references: [id], onDelete: Restrict)
   reconciliationItem        ReconciliationItem?        @relation("ReconciliationItemMovement", fields: [reconciliationItemId], references: [id], onDelete: Restrict)
   salesOrderItem            SalesOrderItem?            @relation("SalesOrderItemMovement", fields: [salesOrderItemId], references: [id], onDelete: Restrict)
+  sourceStockMovement       StockMovement?             @relation("StockMovementLineage", fields: [sourceStockMovementId], references: [id], onDelete: SetNull)
+  consumedByMovements       StockMovement[]            @relation("StockMovementLineage")
 
   @@index([businessId, storeId, occurredAt])
   @@index([inventoryItemId, occurredAt])
   @@index([businessId, movementType, occurredAt])
   @@index([createdByUserId])
+  @@index([sourceStockMovementId])
 }
 
 
