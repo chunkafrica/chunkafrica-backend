@@ -1165,6 +1165,15 @@ export class ProductionBatchesService {
       afterSummary: BatchSnapshotSummary | null;
     },
   ) {
+    const beforeSummary =
+      input.beforeSummary === null
+        ? Prisma.JsonNull
+        : (input.beforeSummary as Prisma.InputJsonValue);
+    const afterSummary =
+      input.afterSummary === null
+        ? Prisma.JsonNull
+        : (input.afterSummary as Prisma.InputJsonValue);
+
     await db.productionBatchEvent.create({
       data: {
         businessId: user.businessId,
@@ -1174,8 +1183,8 @@ export class ProductionBatchesService {
         action: input.action,
         reason: input.reason,
         note: input.note,
-        beforeSummary: input.beforeSummary as Prisma.InputJsonValue | null,
-        afterSummary: input.afterSummary as Prisma.InputJsonValue | null,
+        beforeSummary,
+        afterSummary,
       },
     });
   }
