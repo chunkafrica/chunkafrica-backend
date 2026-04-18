@@ -341,6 +341,8 @@ export class RecipesService {
 
   private serializeRecipe(recipe: RecipeWithRelations) {
     const zero = new Prisma.Decimal(0);
+    const staleCostWindowMs = 30 * 24 * 60 * 60 * 1000;
+    const now = Date.now();
 
     const items = recipe.recipeItems.map((item) => {
       const defaultCostPerUnit = item.inventoryItem.defaultCostPerUnit ?? zero;
@@ -361,6 +363,27 @@ export class RecipesService {
     const costPerYieldUnit = recipe.yieldQuantity.equals(0)
       ? new Prisma.Decimal(0)
       : computedCostBasis.div(recipe.yieldQuantity);
+    const totalCostableItems = items.length;
+    const missingCostItemsCount = items.filter(
+      (item) => item.inventoryItem.defaultCostPerUnit === null,
+    ).length;
+    const costCoverageItemsCount = totalCostableItems - missingCostItemsCount;
+    const costCoveragePercent = totalCostableItems
+      ? new Prisma.Decimal(costCoverageItemsCount).mul(100).div(totalCostableItems)
+      : new Prisma.Decimal(100);
+    const staleCostItemsCount = items.filter((item) => {
+      if (item.inventoryItem.defaultCostPerUnit === null) {
+        return false;
+      }
+
+      return now - new Date(item.inventoryItem.updatedAt).getTime() > staleCostWindowMs;
+    }).length;
+    const costConfidenceLevel =
+      missingCostItemsCount > 0
+        ? 'LOW'
+        : staleCostItemsCount > 0
+          ? 'MEDIUM'
+          : 'HIGH';
 
     return {
       ...recipe,
@@ -372,7 +395,10 @@ export class RecipesService {
       recipeItems: items,
       computedCostBasis,
       costPerYieldUnit,
-      missingCostItemsCount: items.filter((item) => item.inventoryItem.defaultCostPerUnit === null).length,
+      missingCostItemsCount,
+      staleCostItemsCount,
+      costCoveragePercent,
+      costConfidenceLevel,
       hasProductionHistory: recipe._count.productionBatches > 0,
       productionBatchCount: recipe._count.productionBatches,
     };

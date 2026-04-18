@@ -25,7 +25,15 @@ export class ReportsService {
     await this.assertStoreAccess(user.businessId, storeId);
     const range = this.resolveDateRange(query);
 
-    const [salesOrders, expenseAggregate, recentStockIns, recentProductionBatches, recentWasteLogs, recentReconciliations] =
+    const [
+      salesOrders,
+      expenseAggregate,
+      recentStockIns,
+      recentProductionBatches,
+      productionBatchesForIntelligence,
+      recentWasteLogs,
+      recentReconciliations,
+    ] =
       await Promise.all([
         this.prisma.salesOrder.findMany({
           where: this.salesOrdersWhere(user.businessId, storeId, range),
@@ -75,6 +83,41 @@ export class ReportsService {
           },
           orderBy: [{ batchDate: 'desc' }, { createdAt: 'desc' }],
           take: RECENT_LIMIT,
+        }),
+        this.prisma.productionBatch.findMany({
+          where: {
+            businessId: user.businessId,
+            storeId,
+            batchDate: { gte: range.from, lte: range.to },
+            status: ProductionBatchStatus.COMPLETED,
+          },
+          select: {
+            id: true,
+            batchNumber: true,
+            plannedOutputQuantity: true,
+            actualOutputQuantity: true,
+            outputVarianceQuantity: true,
+            expectedUnitCost: true,
+            actualUnitCost: true,
+            expectedTotalCost: true,
+            actualTotalCost: true,
+            menuItem: {
+              select: {
+                name: true,
+              },
+            },
+            recipe: {
+              select: {
+                name: true,
+              },
+            },
+            producedInventoryItem: {
+              select: {
+                name: true,
+                unitOfMeasure: true,
+              },
+            },
+          },
         }),
         this.prisma.wasteLog.findMany({
           where: {
@@ -127,6 +170,57 @@ export class ReportsService {
         name: batch.recipe?.name ?? batch.producedInventoryItem.name,
       },
     }));
+    const abnormalRuns = productionBatchesForIntelligence.filter((batch) => {
+      const expectedOutputQuantity =
+        batch.plannedOutputQuantity ?? new Prisma.Decimal(0);
+      const outputVarianceQuantity =
+        batch.outputVarianceQuantity ?? batch.actualOutputQuantity.minus(expectedOutputQuantity);
+      const expectedUnitCost = batch.expectedUnitCost ?? new Prisma.Decimal(0);
+      const actualUnitCost = batch.actualUnitCost ?? new Prisma.Decimal(0);
+
+      const outputVariancePercent = expectedOutputQuantity.equals(0)
+        ? null
+        : outputVarianceQuantity.abs().div(expectedOutputQuantity);
+      const costVariancePercent = expectedUnitCost.equals(0)
+        ? null
+        : actualUnitCost.minus(expectedUnitCost).abs().div(expectedUnitCost);
+
+      return (
+        (outputVariancePercent ? outputVariancePercent.greaterThan(0.1) : false) ||
+        (costVariancePercent ? costVariancePercent.greaterThan(0.1) : false)
+      );
+    });
+    const topCostVarianceRun = productionBatchesForIntelligence.reduce<{
+      id: string;
+      outputItemName: string;
+      costVarianceAmount: Prisma.Decimal;
+      expectedTotalCost: Prisma.Decimal;
+      actualTotalCost: Prisma.Decimal;
+      batchNumber: string | null;
+      unitOfMeasure: string;
+    } | null>((currentTop, batch) => {
+      const expectedTotalCost = batch.expectedTotalCost ?? new Prisma.Decimal(0);
+      const actualTotalCost = batch.actualTotalCost ?? new Prisma.Decimal(0);
+      const costVarianceAmount = actualTotalCost.minus(expectedTotalCost);
+      const candidate = {
+        id: batch.id,
+        outputItemName:
+          batch.menuItem?.name ?? batch.recipe?.name ?? batch.producedInventoryItem.name,
+        costVarianceAmount,
+        expectedTotalCost,
+        actualTotalCost,
+        batchNumber: batch.batchNumber,
+        unitOfMeasure: batch.producedInventoryItem.unitOfMeasure,
+      };
+
+      if (!currentTop) {
+        return candidate;
+      }
+
+      return candidate.costVarianceAmount.abs().greaterThan(currentTop.costVarianceAmount.abs())
+        ? candidate
+        : currentTop;
+    }, null);
 
     return {
       range,
@@ -142,6 +236,22 @@ export class ReportsService {
       recentReconciliations,
       topSellingMenuItems,
       recentVarianceAlerts,
+      productionIntelligence: {
+        abnormalRunsCount: abnormalRuns.length,
+        topCostVarianceRun: topCostVarianceRun
+          ? {
+              ...topCostVarianceRun,
+              openRunDetail: {
+                productionBatchId: topCostVarianceRun.id,
+                path: `/production?batchId=${topCostVarianceRun.id}`,
+              },
+            }
+          : null,
+        reviewLinks: {
+          production: '/production',
+          reports: '/reports',
+        },
+      },
     };
   }
 
