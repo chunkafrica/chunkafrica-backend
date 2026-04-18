@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import {
   Prisma,
+  ProductionBatchEventAction,
   ProductionBatchStatus,
   StockMovementType,
   Store,
@@ -14,6 +15,8 @@ import { AuthUser } from '../../common/auth/auth-user.interface';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { toDecimal } from '../../common/utils/decimal.util';
 import { CompleteProductionBatchDto } from './dto/complete-production-batch.dto';
+import { CorrectProductionBatchDto } from './dto/correct-production-batch.dto';
+import { CorrectProductionVarianceReasonDto } from './dto/correct-production-variance-reason.dto';
 import { CreateProductionBatchDto } from './dto/create-production-batch.dto';
 import { ListProductionBatchesQueryDto } from './dto/list-production-batches-query.dto';
 import { UpdateProductionBatchDto } from './dto/update-production-batch.dto';
@@ -36,6 +39,31 @@ const batchDetailInclude = {
       id: true,
       fullName: true,
       email: true,
+    },
+  },
+  corrections: {
+    orderBy: { createdAt: 'desc' },
+    include: {
+      actorUser: {
+        select: {
+          id: true,
+          fullName: true,
+          email: true,
+        },
+      },
+      stockMovements: true,
+    },
+  },
+  events: {
+    orderBy: { createdAt: 'asc' },
+    include: {
+      actorUser: {
+        select: {
+          id: true,
+          fullName: true,
+          email: true,
+        },
+      },
     },
   },
   ingredients: {
@@ -103,6 +131,18 @@ type ActiveRecipeForBatch = Prisma.RecipeGetPayload<{
   };
 }>;
 type DbClient = PrismaService | Prisma.TransactionClient;
+type BatchSnapshotSummary = {
+  status: ProductionBatchStatus;
+  batchNumber: string | null;
+  plannedOutputQuantity: string | null;
+  actualOutputQuantity: string;
+  effectiveActualOutputQuantity: string | null;
+  outputVarianceQuantity: string;
+  effectiveOutputVarianceQuantity: string | null;
+  varianceReasonCode: string | null;
+  effectiveVarianceReasonCode: string | null;
+  notes: string | null;
+};
 type ExpectedCostBasisSource =
   | 'STORE_LATEST_SNAPSHOT'
   | 'INVENTORY_DEFAULT_FALLBACK'
@@ -208,6 +248,8 @@ export class ProductionBatchesService {
           expectedCostBasisAt: dto.batchDate,
           actualTotalCost: new Prisma.Decimal(0),
           actualUnitCost: new Prisma.Decimal(0),
+          effectiveActualOutputQuantity: new Prisma.Decimal(0),
+          effectiveOutputVarianceQuantity: new Prisma.Decimal(0),
           status: ProductionBatchStatus.PLANNED,
           notes: dto.notes?.trim(),
         },
@@ -234,6 +276,14 @@ export class ProductionBatchesService {
         include: batchDetailInclude,
       });
 
+      await this.recordBatchEvent(tx, user, storeId, hydratedBatch, {
+        action: ProductionBatchEventAction.CREATED,
+        reason: 'BATCH_CREATED',
+        note: dto.notes?.trim() ?? null,
+        beforeSummary: null,
+        afterSummary: this.buildBatchSnapshotSummary(hydratedBatch),
+      });
+
       return this.serializeBatchDetail(hydratedBatch);
     });
   }
@@ -248,6 +298,7 @@ export class ProductionBatchesService {
 
     return this.prisma.$transaction(async (tx) => {
       const batch = await this.findBatchOrThrow(tx, user.businessId, storeId, batchId);
+      const beforeSummary = this.buildBatchSnapshotSummary(batch);
       this.assertBatchEditable(batch.status);
 
       let nextMenuItemId = batch.menuItemId;
@@ -370,6 +421,14 @@ export class ProductionBatchesService {
         include: batchDetailInclude,
       });
 
+      await this.recordBatchEvent(tx, user, storeId, refreshedBatch, {
+        action: ProductionBatchEventAction.UPDATED,
+        reason: 'BATCH_UPDATED',
+        note: dto.notes?.trim() ?? null,
+        beforeSummary,
+        afterSummary: this.buildBatchSnapshotSummary(refreshedBatch),
+      });
+
       return this.serializeBatchDetail(refreshedBatch);
     });
   }
@@ -378,6 +437,7 @@ export class ProductionBatchesService {
     await this.assertStoreAccess(this.prisma, user.businessId, storeId);
 
     const batch = await this.findBatchOrThrow(this.prisma, user.businessId, storeId, batchId);
+    const beforeSummary = this.buildBatchSnapshotSummary(batch);
     if (batch.status !== ProductionBatchStatus.PLANNED) {
       throw new BadRequestException('Only PLANNED batches can be started.');
     }
@@ -386,6 +446,14 @@ export class ProductionBatchesService {
       where: { id: batch.id },
       data: { status: ProductionBatchStatus.IN_PROGRESS },
       include: batchDetailInclude,
+    });
+
+    await this.recordBatchEvent(this.prisma, user, storeId, startedBatch, {
+      action: ProductionBatchEventAction.STARTED,
+      reason: 'BATCH_STARTED',
+      note: null,
+      beforeSummary,
+      afterSummary: this.buildBatchSnapshotSummary(startedBatch),
     });
 
     return this.serializeBatchDetail(startedBatch);
@@ -401,6 +469,7 @@ export class ProductionBatchesService {
 
     return this.prisma.$transaction(async (tx) => {
       const batch = await this.findBatchOrThrow(tx, user.businessId, storeId, batchId);
+      const beforeSummary = this.buildBatchSnapshotSummary(batch);
       this.assertBatchCompletable(batch.status);
 
       if (batch.outputStockMovement || batch.ingredients.some((ingredient) => ingredient.stockMovement)) {
@@ -670,11 +739,14 @@ export class ProductionBatchesService {
         data: {
           actualOutputQuantity: outputQuantity,
           outputVarianceQuantity,
+          effectiveActualOutputQuantity: outputQuantity,
+          effectiveOutputVarianceQuantity: outputVarianceQuantity,
           expectedTotalCost,
           expectedUnitCost,
           expectedCostBasisSource: batch.expectedCostBasisSource,
           expectedCostBasisAt: plannedAsOf,
           varianceReasonCode: dto.varianceReasonCode ?? null,
+          effectiveVarianceReasonCode: dto.varianceReasonCode ?? null,
           actualTotalCost,
           actualUnitCost,
           recipeVersionUsed: recipe.version,
@@ -690,7 +762,192 @@ export class ProductionBatchesService {
         include: batchDetailInclude,
       });
 
+      await this.recordBatchEvent(tx, user, storeId, completedBatch, {
+        action: ProductionBatchEventAction.COMPLETED,
+        reason: 'BATCH_COMPLETED',
+        note: dto.notes?.trim() ?? null,
+        beforeSummary,
+        afterSummary: this.buildBatchSnapshotSummary(completedBatch),
+      });
+
       return this.serializeBatchDetail(completedBatch);
+    });
+  }
+
+  async correctProductionBatch(
+    user: AuthUser,
+    storeId: string,
+    batchId: string,
+    dto: CorrectProductionBatchDto,
+  ) {
+    await this.assertStoreAccess(this.prisma, user.businessId, storeId);
+
+    return this.prisma.$transaction(async (tx) => {
+      const batch = await this.findBatchOrThrow(tx, user.businessId, storeId, batchId);
+      const beforeSummary = this.buildBatchSnapshotSummary(batch);
+      this.assertBatchCorrectable(batch.status);
+
+      if (!batch.outputStockMovement) {
+        throw new ConflictException('Only batches with posted output can be corrected.');
+      }
+
+      const previousActualOutputQuantity =
+        batch.effectiveActualOutputQuantity ?? batch.actualOutputQuantity;
+      const correctedActualOutputQuantity = toDecimal(dto.correctedActualOutputQuantity)!;
+      const outputDeltaQuantity = correctedActualOutputQuantity.minus(previousActualOutputQuantity);
+
+      if (outputDeltaQuantity.equals(0)) {
+        throw new BadRequestException('The corrected output must be different from the current effective output.');
+      }
+
+      if (outputDeltaQuantity.lessThan(0)) {
+        const outputBalance = await tx.stockMovement.aggregate({
+          where: {
+            businessId: user.businessId,
+            storeId,
+            inventoryItemId: batch.producedInventoryItemId,
+            occurredAt: { lte: dto.correctedAt },
+          },
+          _sum: {
+            quantityChange: true,
+          },
+        });
+
+        const onHand = outputBalance._sum.quantityChange ?? new Prisma.Decimal(0);
+        if (outputDeltaQuantity.abs().greaterThan(onHand)) {
+          throw new BadRequestException(
+            `Insufficient output stock to reduce this batch. Needed ${outputDeltaQuantity.abs().toString()}, on hand ${onHand.toString()}.`,
+          );
+        }
+      }
+
+      const correction = await tx.productionBatchCorrection.create({
+        data: {
+          businessId: user.businessId,
+          storeId,
+          productionBatchId: batch.id,
+          actorUserId: user.userId,
+          correctionType: 'OUTPUT',
+          reason: dto.reason.trim(),
+          note: dto.note.trim(),
+          previousActualOutputQuantity,
+          correctedActualOutputQuantity,
+          outputDeltaQuantity,
+        },
+      });
+
+      const effectiveOutputVarianceQuantity = correctedActualOutputQuantity.minus(
+        batch.plannedOutputQuantity ?? batch.recipe.yieldQuantity,
+      );
+      const effectiveUnitCost = correctedActualOutputQuantity.equals(0)
+        ? new Prisma.Decimal(0)
+        : batch.actualTotalCost.div(correctedActualOutputQuantity);
+      const outputDeltaCost = outputDeltaQuantity.mul(effectiveUnitCost);
+
+      await tx.stockMovement.create({
+        data: {
+          businessId: user.businessId,
+          storeId,
+          inventoryItemId: batch.producedInventoryItemId,
+          createdByUserId: user.userId,
+          movementType: StockMovementType.PRODUCTION_OUTPUT,
+          quantityChange: outputDeltaQuantity,
+          unitCostSnapshot: effectiveUnitCost,
+          totalCostSnapshot: outputDeltaCost,
+          occurredAt: dto.correctedAt,
+          notes: `Production output correction for batch ${batch.batchNumber ?? batch.id}. ${dto.note.trim()}`,
+          productionBatchCorrectionId: correction.id,
+          sourceStockMovementId: batch.outputStockMovement.id,
+        },
+      });
+
+      await tx.productionBatch.update({
+        where: { id: batch.id },
+        data: {
+          effectiveActualOutputQuantity: correctedActualOutputQuantity,
+          effectiveOutputVarianceQuantity,
+          status: ProductionBatchStatus.CORRECTION_POSTED,
+          lastCorrectionAt: dto.correctedAt,
+        },
+      });
+
+      const correctedBatch = await tx.productionBatch.findUniqueOrThrow({
+        where: { id: batch.id },
+        include: batchDetailInclude,
+      });
+
+      await this.recordBatchEvent(tx, user, storeId, correctedBatch, {
+        action: ProductionBatchEventAction.CORRECTED,
+        reason: dto.reason.trim(),
+        note: dto.note.trim(),
+        beforeSummary,
+        afterSummary: this.buildBatchSnapshotSummary(correctedBatch),
+      });
+
+      return this.serializeBatchDetail(correctedBatch);
+    });
+  }
+
+  async correctProductionVarianceReason(
+    user: AuthUser,
+    storeId: string,
+    batchId: string,
+    dto: CorrectProductionVarianceReasonDto,
+  ) {
+    await this.assertStoreAccess(this.prisma, user.businessId, storeId);
+
+    return this.prisma.$transaction(async (tx) => {
+      const batch = await this.findBatchOrThrow(tx, user.businessId, storeId, batchId);
+      const beforeSummary = this.buildBatchSnapshotSummary(batch);
+      this.assertBatchCorrectable(batch.status);
+
+      const previousVarianceReasonCode =
+        batch.effectiveVarianceReasonCode ?? batch.varianceReasonCode ?? null;
+
+      if (previousVarianceReasonCode === dto.nextVarianceReasonCode) {
+        throw new BadRequestException('The corrected variance reason must be different from the current effective reason.');
+      }
+
+      await tx.productionBatchCorrection.create({
+        data: {
+          businessId: user.businessId,
+          storeId,
+          productionBatchId: batch.id,
+          actorUserId: user.userId,
+          correctionType: 'VARIANCE_REASON',
+          reason: dto.reason.trim(),
+          note: dto.note.trim(),
+          previousVarianceReasonCode,
+          correctedVarianceReasonCode: dto.nextVarianceReasonCode,
+        },
+      });
+
+      await tx.productionBatch.update({
+        where: { id: batch.id },
+        data: {
+          effectiveVarianceReasonCode: dto.nextVarianceReasonCode,
+          status:
+            batch.status === ProductionBatchStatus.COMPLETED
+              ? ProductionBatchStatus.CORRECTION_POSTED
+              : batch.status,
+          lastCorrectionAt: new Date(),
+        },
+      });
+
+      const correctedBatch = await tx.productionBatch.findUniqueOrThrow({
+        where: { id: batch.id },
+        include: batchDetailInclude,
+      });
+
+      await this.recordBatchEvent(tx, user, storeId, correctedBatch, {
+        action: ProductionBatchEventAction.VARIANCE_REASON_CORRECTED,
+        reason: dto.reason.trim(),
+        note: dto.note.trim(),
+        beforeSummary,
+        afterSummary: this.buildBatchSnapshotSummary(correctedBatch),
+      });
+
+      return this.serializeBatchDetail(correctedBatch);
     });
   }
 
@@ -698,6 +955,7 @@ export class ProductionBatchesService {
     await this.assertStoreAccess(this.prisma, user.businessId, storeId);
 
     const batch = await this.findBatchOrThrow(this.prisma, user.businessId, storeId, batchId);
+    const beforeSummary = this.buildBatchSnapshotSummary(batch);
     this.assertBatchEditable(batch.status);
 
     const cancelledBatch = await this.prisma.productionBatch.update({
@@ -706,12 +964,23 @@ export class ProductionBatchesService {
       include: batchDetailInclude,
     });
 
+    await this.recordBatchEvent(this.prisma, user, storeId, cancelledBatch, {
+      action: ProductionBatchEventAction.CANCELLED,
+      reason: 'BATCH_CANCELLED',
+      note: null,
+      beforeSummary,
+      afterSummary: this.buildBatchSnapshotSummary(cancelledBatch),
+    });
+
     return this.serializeBatchDetail(cancelledBatch);
   }
 
   private serializeBatchSummary(batch: ProductionBatchSummaryRecord) {
     const definitionName =
       batch.menuItem?.name ?? batch.recipe?.name ?? batch.producedInventoryItem.name;
+    const effectiveActualOutputQuantity =
+      batch.effectiveActualOutputQuantity ?? batch.actualOutputQuantity;
+    const expectedOutputQuantity = batch.plannedOutputQuantity ?? batch.recipe.yieldQuantity;
 
     return {
       ...batch,
@@ -720,11 +989,17 @@ export class ProductionBatchesService {
         name: definitionName,
       },
       outputVarianceQuantity: batch.outputVarianceQuantity ?? new Prisma.Decimal(0),
-      expectedOutputQuantity: batch.plannedOutputQuantity ?? batch.recipe.yieldQuantity,
+      effectiveActualOutputQuantity,
+      effectiveOutputVarianceQuantity:
+        batch.effectiveOutputVarianceQuantity ??
+        effectiveActualOutputQuantity.minus(expectedOutputQuantity),
+      expectedOutputQuantity,
       expectedTotalCost: batch.expectedTotalCost ?? new Prisma.Decimal(0),
       expectedUnitCost: batch.expectedUnitCost ?? new Prisma.Decimal(0),
       expectedCostBasisSource: batch.expectedCostBasisSource,
       expectedCostBasisAt: batch.expectedCostBasisAt,
+      effectiveVarianceReasonCode:
+        batch.effectiveVarianceReasonCode ?? batch.varianceReasonCode ?? null,
       actualTotalCost: batch.actualTotalCost ?? new Prisma.Decimal(0),
       actualUnitCost: batch.actualUnitCost ?? new Prisma.Decimal(0),
     };
@@ -733,6 +1008,9 @@ export class ProductionBatchesService {
   private serializeBatchDetail(batch: ProductionBatchWithRelations) {
     const definitionName =
       batch.menuItem?.name ?? batch.recipe.name ?? batch.producedInventoryItem.name;
+    const effectiveActualOutputQuantity =
+      batch.effectiveActualOutputQuantity ?? batch.actualOutputQuantity;
+    const expectedOutputQuantity = batch.plannedOutputQuantity ?? batch.recipe.yieldQuantity;
 
     return {
       ...batch,
@@ -741,11 +1019,17 @@ export class ProductionBatchesService {
         name: definitionName,
       },
       outputVarianceQuantity: batch.outputVarianceQuantity ?? new Prisma.Decimal(0),
-      expectedOutputQuantity: batch.plannedOutputQuantity ?? batch.recipe.yieldQuantity,
+      expectedOutputQuantity,
+      effectiveActualOutputQuantity,
+      effectiveOutputVarianceQuantity:
+        batch.effectiveOutputVarianceQuantity ??
+        effectiveActualOutputQuantity.minus(expectedOutputQuantity),
       expectedTotalCost: batch.expectedTotalCost ?? new Prisma.Decimal(0),
       expectedUnitCost: batch.expectedUnitCost ?? new Prisma.Decimal(0),
       expectedCostBasisSource: batch.expectedCostBasisSource,
       expectedCostBasisAt: batch.expectedCostBasisAt,
+      effectiveVarianceReasonCode:
+        batch.effectiveVarianceReasonCode ?? batch.varianceReasonCode ?? null,
       actualTotalCost: batch.actualTotalCost ?? new Prisma.Decimal(0),
       actualUnitCost: batch.actualUnitCost ?? new Prisma.Decimal(0),
     };
@@ -839,6 +1123,61 @@ export class ProductionBatchesService {
         'Only PLANNED or IN_PROGRESS batches can be completed.',
       );
     }
+  }
+
+  private assertBatchCorrectable(status: ProductionBatchStatus) {
+    if (
+      status !== ProductionBatchStatus.COMPLETED &&
+      status !== ProductionBatchStatus.CORRECTION_POSTED
+    ) {
+      throw new BadRequestException(
+        'Only COMPLETED or CORRECTION_POSTED batches can be corrected.',
+      );
+    }
+  }
+
+  private buildBatchSnapshotSummary(batch: ProductionBatchWithRelations): BatchSnapshotSummary {
+    return {
+      status: batch.status,
+      batchNumber: batch.batchNumber ?? null,
+      plannedOutputQuantity: batch.plannedOutputQuantity?.toString() ?? null,
+      actualOutputQuantity: batch.actualOutputQuantity.toString(),
+      effectiveActualOutputQuantity: batch.effectiveActualOutputQuantity?.toString() ?? null,
+      outputVarianceQuantity: batch.outputVarianceQuantity.toString(),
+      effectiveOutputVarianceQuantity:
+        batch.effectiveOutputVarianceQuantity?.toString() ?? null,
+      varianceReasonCode: batch.varianceReasonCode ?? null,
+      effectiveVarianceReasonCode: batch.effectiveVarianceReasonCode ?? null,
+      notes: batch.notes ?? null,
+    };
+  }
+
+  private async recordBatchEvent(
+    db: DbClient,
+    user: AuthUser,
+    storeId: string,
+    batch: ProductionBatchWithRelations,
+    input: {
+      action: ProductionBatchEventAction;
+      reason: string;
+      note: string | null;
+      beforeSummary: BatchSnapshotSummary | null;
+      afterSummary: BatchSnapshotSummary | null;
+    },
+  ) {
+    await db.productionBatchEvent.create({
+      data: {
+        businessId: user.businessId,
+        storeId,
+        productionBatchId: batch.id,
+        actorUserId: user.userId,
+        action: input.action,
+        reason: input.reason,
+        note: input.note,
+        beforeSummary: input.beforeSummary as Prisma.InputJsonValue | null,
+        afterSummary: input.afterSummary as Prisma.InputJsonValue | null,
+      },
+    });
   }
 
   private async buildPlannedIngredientCostLines(

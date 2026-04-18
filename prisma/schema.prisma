@@ -87,7 +87,23 @@ enum ProductionBatchStatus {
   PLANNED
   IN_PROGRESS
   COMPLETED
+  CORRECTION_POSTED
   CANCELLED
+}
+
+enum ProductionBatchCorrectionType {
+  OUTPUT
+  VARIANCE_REASON
+}
+
+enum ProductionBatchEventAction {
+  CREATED
+  UPDATED
+  STARTED
+  COMPLETED
+  CANCELLED
+  CORRECTED
+  VARIANCE_REASON_CORRECTED
 }
 
 enum ReconciliationStatus {
@@ -145,6 +161,8 @@ model Business {
   customers                Customer[]
   stockInRecords           StockInRecord[]
   productionBatches        ProductionBatch[]
+  productionBatchCorrections ProductionBatchCorrection[]
+  productionBatchEvents    ProductionBatchEvent[]
   wasteLogs                WasteLog[]
   salesOrders              SalesOrder[]
   salesOrderEvents         SalesOrderEvent[]
@@ -175,6 +193,8 @@ model Store {
   primaryUsers             User[]                   @relation("UserPrimaryStore")
   stockInRecords           StockInRecord[]
   productionBatches        ProductionBatch[]
+  productionBatchCorrections ProductionBatchCorrection[]
+  productionBatchEvents    ProductionBatchEvent[]
   wasteLogs                WasteLog[]
   salesOrders              SalesOrder[]
   salesOrderEvents         SalesOrderEvent[]
@@ -226,6 +246,8 @@ model User {
   primaryStore                    Store?                    @relation("UserPrimaryStore", fields: [primaryStoreId], references: [id], onDelete: SetNull)
   stockInRecordsCreated           StockInRecord[]           @relation("StockInRecordCreatedBy")
   productionBatchesCreated        ProductionBatch[]         @relation("ProductionBatchCreatedBy")
+  productionBatchCorrectionsCreated ProductionBatchCorrection[] @relation("ProductionBatchCorrectionActor")
+  productionBatchEventsCreated    ProductionBatchEvent[]    @relation("ProductionBatchEventActor")
   wasteLogsCreated                WasteLog[]                @relation("WasteLogCreatedBy")
   salesOrdersCreated              SalesOrder[]              @relation("SalesOrderCreatedBy")
   salesOrderEventsCreated         SalesOrderEvent[]         @relation("SalesOrderEventActor")
@@ -429,10 +451,14 @@ model ProductionBatch {
   expectedCostBasisSource String?
   expectedCostBasisAt     DateTime?
   varianceReasonCode      String?
+  effectiveActualOutputQuantity   Decimal?      @db.Decimal(18,4)
+  effectiveOutputVarianceQuantity Decimal?      @db.Decimal(18,4)
+  effectiveVarianceReasonCode     String?
   actualTotalCost         Decimal               @default(0) @db.Decimal(18,4)
   actualUnitCost          Decimal               @default(0) @db.Decimal(18,4)
   status                  ProductionBatchStatus @default(PLANNED)
   notes                   String?               @db.Text
+  lastCorrectionAt        DateTime?
   createdAt               DateTime              @default(now())
   updatedAt               DateTime              @updatedAt
 
@@ -443,6 +469,8 @@ model ProductionBatch {
   producedInventoryItem InventoryItem               @relation("ProductionBatchOutputInventoryItem", fields: [producedInventoryItemId], references: [id], onDelete: Restrict)
   createdByUser         User                        @relation("ProductionBatchCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
   ingredients           ProductionBatchIngredient[]
+  corrections           ProductionBatchCorrection[]
+  events                ProductionBatchEvent[]
   outputStockMovement   StockMovement?              @relation("ProductionBatchOutputMovement")
 
   @@index([businessId, storeId, batchDate])
@@ -450,6 +478,7 @@ model ProductionBatch {
   @@index([createdByUserId])
   @@index([status])
   @@index([businessId, batchNumber])
+  @@index([lastCorrectionAt])
 }
 
 model ProductionBatchIngredient {
@@ -471,6 +500,56 @@ model ProductionBatchIngredient {
 
   @@unique([productionBatchId, inventoryItemId])
   @@index([inventoryItemId])
+}
+
+model ProductionBatchCorrection {
+  id                           String                        @id @default(uuid()) @db.Uuid
+  businessId                   String                        @db.Uuid
+  storeId                      String                        @db.Uuid
+  productionBatchId            String                        @db.Uuid
+  actorUserId                  String                        @db.Uuid
+  correctionType               ProductionBatchCorrectionType
+  reason                       String
+  note                         String                        @db.Text
+  previousActualOutputQuantity Decimal?                      @db.Decimal(18,4)
+  correctedActualOutputQuantity Decimal?                     @db.Decimal(18,4)
+  outputDeltaQuantity          Decimal?                      @db.Decimal(18,4)
+  previousVarianceReasonCode   String?
+  correctedVarianceReasonCode  String?
+  createdAt                    DateTime                      @default(now())
+
+  business        Business        @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  store           Store           @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  productionBatch ProductionBatch @relation(fields: [productionBatchId], references: [id], onDelete: Restrict)
+  actorUser       User            @relation("ProductionBatchCorrectionActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+  stockMovements  StockMovement[] @relation("ProductionBatchCorrectionMovement")
+
+  @@index([businessId, storeId, createdAt])
+  @@index([productionBatchId, createdAt])
+  @@index([actorUserId])
+}
+
+model ProductionBatchEvent {
+  id                String                     @id @default(uuid()) @db.Uuid
+  businessId        String                     @db.Uuid
+  storeId           String                     @db.Uuid
+  productionBatchId String                     @db.Uuid
+  actorUserId       String                     @db.Uuid
+  action            ProductionBatchEventAction
+  reason            String
+  note              String?                    @db.Text
+  beforeSummary     Json?
+  afterSummary      Json?
+  createdAt         DateTime                   @default(now())
+
+  business        Business        @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  store           Store           @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  productionBatch ProductionBatch @relation(fields: [productionBatchId], references: [id], onDelete: Restrict)
+  actorUser       User            @relation("ProductionBatchEventActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+
+  @@index([businessId, storeId, createdAt])
+  @@index([productionBatchId, createdAt])
+  @@index([actorUserId])
 }
 
 model WasteCategory {
@@ -767,6 +846,7 @@ model StockMovement {
   stockInItemId               String?           @unique @db.Uuid
   productionBatchIngredientId String?           @unique @db.Uuid
   productionBatchId           String?           @unique @db.Uuid
+  productionBatchCorrectionId String?           @db.Uuid
   wasteLogId                  String?           @unique @db.Uuid
   reconciliationItemId        String?           @unique @db.Uuid
   salesOrderItemId            String?           @unique @db.Uuid
@@ -783,6 +863,7 @@ model StockMovement {
   stockInItem               StockInItem?               @relation("StockInItemMovement", fields: [stockInItemId], references: [id], onDelete: Restrict)
   productionBatchIngredient ProductionBatchIngredient? @relation("ProductionUseMovement", fields: [productionBatchIngredientId], references: [id], onDelete: Restrict)
   productionBatch           ProductionBatch?           @relation("ProductionBatchOutputMovement", fields: [productionBatchId], references: [id], onDelete: Restrict)
+  productionBatchCorrection ProductionBatchCorrection? @relation("ProductionBatchCorrectionMovement", fields: [productionBatchCorrectionId], references: [id], onDelete: SetNull)
   wasteLog                  WasteLog?                  @relation("WasteLogMovement", fields: [wasteLogId], references: [id], onDelete: Restrict)
   reconciliationItem        ReconciliationItem?        @relation("ReconciliationItemMovement", fields: [reconciliationItemId], references: [id], onDelete: Restrict)
   salesOrderItem            SalesOrderItem?            @relation("SalesOrderItemMovement", fields: [salesOrderItemId], references: [id], onDelete: Restrict)
@@ -794,6 +875,7 @@ model StockMovement {
   @@index([inventoryItemId, occurredAt])
   @@index([businessId, movementType, occurredAt])
   @@index([createdByUserId])
+  @@index([productionBatchCorrectionId])
   @@index([sourceStockInRecordId])
   @@index([sourceStockMovementId])
 }

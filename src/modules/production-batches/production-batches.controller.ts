@@ -15,6 +15,8 @@ import { Roles } from '../../common/auth/roles.decorator';
 import { RolesGuard } from '../../common/auth/roles.guard';
 import { UserContextGuard } from '../../common/auth/user-context.guard';
 import { CompleteProductionBatchDto } from './dto/complete-production-batch.dto';
+import { CorrectProductionBatchDto } from './dto/correct-production-batch.dto';
+import { CorrectProductionVarianceReasonDto } from './dto/correct-production-variance-reason.dto';
 import { CreateProductionBatchDto } from './dto/create-production-batch.dto';
 import { ListProductionBatchesQueryDto } from './dto/list-production-batches-query.dto';
 import { UpdateProductionBatchDto } from './dto/update-production-batch.dto';
@@ -95,5 +97,32 @@ export class ProductionBatchesController {
     @Param('batchId', new ParseUUIDPipe()) batchId: string,
   ) {
     return this.productionBatchesService.cancelProductionBatch(user, storeId, batchId);
+  }
+
+  @Post(':batchId/correct')
+  @Roles('OWNER', 'ADMIN', 'INVENTORY_MANAGER', 'PRODUCTION_MANAGER')
+  correctProductionBatch(
+    @CurrentUser() user: AuthUser,
+    @Param('storeId', new ParseUUIDPipe()) storeId: string,
+    @Param('batchId', new ParseUUIDPipe()) batchId: string,
+    @Body() dto: CorrectProductionBatchDto,
+  ) {
+    return this.productionBatchesService.correctProductionBatch(user, storeId, batchId, dto);
+  }
+
+  @Post(':batchId/correct-variance-reason')
+  @Roles('OWNER', 'ADMIN', 'INVENTORY_MANAGER', 'PRODUCTION_MANAGER')
+  correctProductionVarianceReason(
+    @CurrentUser() user: AuthUser,
+    @Param('storeId', new ParseUUIDPipe()) storeId: string,
+    @Param('batchId', new ParseUUIDPipe()) batchId: string,
+    @Body() dto: CorrectProductionVarianceReasonDto,
+  ) {
+    return this.productionBatchesService.correctProductionVarianceReason(
+      user,
+      storeId,
+      batchId,
+      dto,
+    );
   }
 }

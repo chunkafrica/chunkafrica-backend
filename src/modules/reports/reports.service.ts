@@ -89,18 +89,27 @@ export class ReportsService {
             businessId: user.businessId,
             storeId,
             batchDate: { gte: range.from, lte: range.to },
-            status: ProductionBatchStatus.COMPLETED,
+            status: {
+              in: [
+                ProductionBatchStatus.COMPLETED,
+                ProductionBatchStatus.CORRECTION_POSTED,
+              ],
+            },
           },
           select: {
             id: true,
             batchNumber: true,
             plannedOutputQuantity: true,
             actualOutputQuantity: true,
+            effectiveActualOutputQuantity: true,
             outputVarianceQuantity: true,
+            effectiveOutputVarianceQuantity: true,
             expectedUnitCost: true,
             actualUnitCost: true,
             expectedTotalCost: true,
             actualTotalCost: true,
+            varianceReasonCode: true,
+            effectiveVarianceReasonCode: true,
             menuItem: {
               select: {
                 name: true,
@@ -173,8 +182,12 @@ export class ReportsService {
     const abnormalRuns = productionBatchesForIntelligence.filter((batch) => {
       const expectedOutputQuantity =
         batch.plannedOutputQuantity ?? new Prisma.Decimal(0);
+      const effectiveActualOutputQuantity =
+        batch.effectiveActualOutputQuantity ?? batch.actualOutputQuantity;
       const outputVarianceQuantity =
-        batch.outputVarianceQuantity ?? batch.actualOutputQuantity.minus(expectedOutputQuantity);
+        batch.effectiveOutputVarianceQuantity ??
+        batch.outputVarianceQuantity ??
+        effectiveActualOutputQuantity.minus(expectedOutputQuantity);
       const expectedUnitCost = batch.expectedUnitCost ?? new Prisma.Decimal(0);
       const actualUnitCost = batch.actualUnitCost ?? new Prisma.Decimal(0);
 
@@ -383,14 +396,26 @@ export class ReportsService {
       orderBy: [{ batchDate: 'desc' }, { createdAt: 'desc' }],
     });
 
-    const completedBatches = batches.filter((batch) => batch.status === ProductionBatchStatus.COMPLETED);
-    const outputQuantity = this.sumDecimals(completedBatches.map((batch) => batch.actualOutputQuantity));
+    const completedBatches = batches.filter(
+      (batch) =>
+        batch.status === ProductionBatchStatus.COMPLETED ||
+        batch.status === ProductionBatchStatus.CORRECTION_POSTED,
+    );
+    const outputQuantity = this.sumDecimals(
+      completedBatches.map(
+        (batch) => batch.effectiveActualOutputQuantity ?? batch.actualOutputQuantity,
+      ),
+    );
 
     const varianceTable = completedBatches.map((batch) => {
       const expectedOutputQuantity =
         batch.plannedOutputQuantity ?? batch.recipe?.yieldQuantity ?? new Prisma.Decimal(0);
+      const effectiveActualOutputQuantity =
+        batch.effectiveActualOutputQuantity ?? batch.actualOutputQuantity;
       const outputVarianceQuantity =
-        batch.outputVarianceQuantity ?? batch.actualOutputQuantity.minus(expectedOutputQuantity);
+        batch.effectiveOutputVarianceQuantity ??
+        batch.outputVarianceQuantity ??
+        effectiveActualOutputQuantity.minus(expectedOutputQuantity);
       const expectedUnitCost = batch.expectedUnitCost ?? new Prisma.Decimal(0);
       const actualUnitCost = batch.actualUnitCost ?? new Prisma.Decimal(0);
       const expectedTotalCost = batch.expectedTotalCost ?? new Prisma.Decimal(0);
@@ -414,14 +439,15 @@ export class ReportsService {
           batch.menuItem?.name ?? batch.recipe?.name ?? batch.producedInventoryItem.name,
         producedInventoryItemId: batch.producedInventoryItemId,
         expectedOutputQuantity,
-        actualOutputQuantity: batch.actualOutputQuantity,
+        actualOutputQuantity: effectiveActualOutputQuantity,
         varianceQuantity: outputVarianceQuantity,
         expectedTotalCost,
         actualTotalCost,
         costVarianceAmount,
         expectedUnitCost,
         actualUnitCost,
-        varianceReasonCode: batch.varianceReasonCode,
+        varianceReasonCode:
+          batch.effectiveVarianceReasonCode ?? batch.varianceReasonCode,
         openRunDetail: {
           productionBatchId: batch.id,
           path: `/production?batchId=${batch.id}`,
@@ -452,7 +478,9 @@ export class ReportsService {
           completedBatches: 0,
         };
 
-        existing.outputQuantity = existing.outputQuantity.plus(batch.actualOutputQuantity);
+        existing.outputQuantity = existing.outputQuantity.plus(
+          batch.effectiveActualOutputQuantity ?? batch.actualOutputQuantity,
+        );
         existing.completedBatches += 1;
         accumulator.set(key, existing);
         return accumulator;
@@ -469,6 +497,9 @@ export class ReportsService {
         plannedBatches: batches.filter((batch) => batch.status === ProductionBatchStatus.PLANNED).length,
         inProgressBatches: batches.filter((batch) => batch.status === ProductionBatchStatus.IN_PROGRESS).length,
         completedBatches: completedBatches.length,
+        correctedBatches: batches.filter(
+          (batch) => batch.status === ProductionBatchStatus.CORRECTION_POSTED,
+        ).length,
         cancelledBatches: batches.filter((batch) => batch.status === ProductionBatchStatus.CANCELLED).length,
         totalOutputQuantity: outputQuantity,
       },
