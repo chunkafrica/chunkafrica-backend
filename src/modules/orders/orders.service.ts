@@ -10,6 +10,8 @@ import {
   MenuItem,
   PaymentStatus,
   Prisma,
+  SalesOrderControlAction,
+  SalesOrderReasonCode,
   SalesChannel,
   SalesOrderStatus,
   StockMovementType,
@@ -18,10 +20,14 @@ import {
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { toDecimal } from '../../common/utils/decimal.util';
+import { CancelOrderDto } from './dto/cancel-order.dto';
 import { CreateReceiptDto } from './dto/create-receipt.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { FulfillOrderDto } from './dto/fulfill-order.dto';
 import { ListOrdersQueryDto } from './dto/list-orders-query.dto';
+import { ReopenOrderDto } from './dto/reopen-order.dto';
+import { TransitionOrderDto } from './dto/transition-order.dto';
+import { UpdateOrderDto } from './dto/update-order.dto';
 
 const salesOrderInclude = {
   store: true,
@@ -62,6 +68,18 @@ const salesOrderInclude = {
     },
     orderBy: [{ issuedAt: 'asc' }, { createdAt: 'asc' }],
   },
+  events: {
+    include: {
+      actorUser: {
+        select: {
+          id: true,
+          fullName: true,
+          email: true,
+        },
+      },
+    },
+    orderBy: [{ createdAt: 'desc' }],
+  },
 } satisfies Prisma.SalesOrderInclude;
 
 const receiptInclude = {
@@ -95,6 +113,31 @@ type ResolvedCreateOrderItem = {
   menuItem: MenuItem;
   fulfilledInventoryItem: InventoryItem;
 };
+
+const EDITABLE_ORDER_STATUSES = new Set<SalesOrderStatus>([
+  SalesOrderStatus.NEW,
+  SalesOrderStatus.PREPARING,
+]);
+
+const ORDER_TRANSITION_GUARD_MAP: Record<SalesOrderStatus, SalesOrderStatus[]> = {
+  [SalesOrderStatus.NEW]: [SalesOrderStatus.PREPARING],
+  [SalesOrderStatus.PREPARING]: [SalesOrderStatus.READY_FOR_DELIVERY],
+  [SalesOrderStatus.READY_FOR_DELIVERY]: [SalesOrderStatus.OUT_FOR_DELIVERY],
+  [SalesOrderStatus.OUT_FOR_DELIVERY]: [],
+  [SalesOrderStatus.DELIVERED]: [],
+  [SalesOrderStatus.CANCELLED]: [],
+};
+
+const CANCEL_REASON_CODES = new Set<SalesOrderReasonCode>([
+  SalesOrderReasonCode.CANCEL_CUSTOMER_REQUEST,
+  SalesOrderReasonCode.CANCEL_DUPLICATE,
+  SalesOrderReasonCode.CANCEL_OPERATOR_ERROR,
+]);
+
+const REOPEN_REASON_CODES = new Set<SalesOrderReasonCode>([
+  SalesOrderReasonCode.REOPEN_CUSTOMER_REQUEST,
+  SalesOrderReasonCode.REOPEN_OPERATOR_ERROR,
+]);
 
 @Injectable()
 export class OrdersService {
@@ -134,97 +177,12 @@ export class OrdersService {
     return this.prisma.$transaction(async (tx) => {
       await this.assertStoreAccess(tx, user.businessId, storeId);
       const customer = await this.resolveCustomer(tx, user.businessId, dto.customerId);
-
-      const resolvedItems: Array<{ quantity: Prisma.Decimal; menuItem: MenuItem }> = [];
-      for (const item of dto.items) {
-        const menuItem = await this.resolveMenuItemForCreateOrderItem(
-          tx,
-          user.businessId,
-          item,
-        );
-
-        resolvedItems.push({
-          quantity: toDecimal(item.quantity)!,
-          menuItem,
-        });
-      }
-
-      const uniqueMenuItemIds = Array.from(
-        new Set(resolvedItems.map((item) => item.menuItem.id)),
+      const orderLineItemData = await this.resolveOrderLineItemData(
+        tx,
+        user.businessId,
+        dto.items,
       );
-
-      const activeRecipes = await tx.recipe.findMany({
-        where: {
-          businessId: user.businessId,
-          menuItemId: { in: uniqueMenuItemIds },
-          isActive: true,
-          deletedAt: null,
-        },
-        include: {
-          producedInventoryItem: true,
-        },
-      });
-
-      const recipeMap = new Map<string, (typeof activeRecipes)[number]>();
-      for (const recipe of activeRecipes) {
-        if (!recipe.menuItemId) {
-          continue;
-        }
-
-        if (recipeMap.has(recipe.menuItemId)) {
-          throw new ConflictException(
-            'A menu item has multiple active recipes. Resolve recipe activation before creating the order.',
-          );
-        }
-
-        recipeMap.set(recipe.menuItemId, recipe);
-      }
-
-      const orderLineItems: ResolvedCreateOrderItem[] = [];
-      for (const item of resolvedItems) {
-        const recipe = recipeMap.get(item.menuItem.id);
-        const fulfilledInventoryItem = recipe
-          ? recipe.producedInventoryItem
-          : await this.findOrCreateSalesFinishedInventoryItem(
-              tx,
-              user.businessId,
-              item.menuItem,
-            );
-
-        if (
-          fulfilledInventoryItem.deletedAt !== null ||
-          !fulfilledInventoryItem.isActive ||
-          fulfilledInventoryItem.itemType !== InventoryItemType.FINISHED_GOOD
-        ) {
-          throw new BadRequestException(
-            `Menu item ${item.menuItem.name} does not resolve to an active finished-good inventory item.`,
-          );
-        }
-
-        orderLineItems.push({
-          quantity: item.quantity,
-          menuItem: item.menuItem,
-          fulfilledInventoryItem,
-        });
-      }
-
-      const orderLineItemData = orderLineItems.map((item) => {
-        const unitPrice = item.menuItem.defaultPrice;
-        const lineTotal = unitPrice.mul(item.quantity);
-
-        return {
-          menuItemId: item.menuItem.id,
-          fulfilledInventoryItemId: item.fulfilledInventoryItem.id,
-          quantity: item.quantity,
-          unitPrice,
-          lineTotal,
-        };
-      });
-
-      const subtotal = this.sumDecimals(orderLineItemData.map((item) => item.lineTotal));
-      const discount = new Prisma.Decimal(0);
-      const tax = new Prisma.Decimal(0);
-      const total = subtotal.minus(discount).plus(tax);
+      const { subtotal, discount, tax, total } = this.computeOrderAmounts(orderLineItemData);
       const orderedAt = dto.orderedAt ?? new Date();
       const orderNumber = await this.resolveOrderNumber(tx, user.businessId, orderedAt);
       const paymentStatus = this.computePaymentStatus(new Prisma.Decimal(0), total);
@@ -252,7 +210,248 @@ export class OrdersService {
         include: salesOrderInclude,
       });
 
+      await this.recordOrderEvent(tx, {
+        order,
+        actorUserId: user.userId,
+        action: SalesOrderControlAction.CREATED,
+        reasonCode: SalesOrderReasonCode.ORDER_CREATED,
+        note: dto.notes?.trim() ?? null,
+        beforeSummary: undefined,
+      });
+
       return this.mapSalesOrder(order);
+    });
+  }
+
+  async updateOrder(user: AuthUser, orderId: string, dto: UpdateOrderDto) {
+    return this.prisma.$transaction(async (tx) => {
+      const order = await this.findOrderOrThrow(tx, user.businessId, orderId);
+      const metadataOnly = this.isMetadataOnlyUpdate(dto);
+      const hasReceipts = order.receipts.length > 0;
+      const hasFulfillment = this.hasFulfillmentMovement(order);
+
+      if (order.orderStatus === SalesOrderStatus.CANCELLED) {
+        throw new BadRequestException('Cancelled orders cannot be edited. Reopen the order first.');
+      }
+
+      if (metadataOnly) {
+        if (
+          dto.reasonCode !== SalesOrderReasonCode.METADATA_CORRECTION &&
+          dto.reasonCode !== SalesOrderReasonCode.COMMERCIAL_CORRECTION
+        ) {
+          throw new BadRequestException(
+            'Metadata-only updates must use METADATA_CORRECTION or COMMERCIAL_CORRECTION.',
+          );
+        }
+      } else {
+        if (!EDITABLE_ORDER_STATUSES.has(order.orderStatus)) {
+          throw new BadRequestException(
+            'Only NEW or PREPARING orders can be edited before fulfillment/payment begins.',
+          );
+        }
+
+        if (hasFulfillment || hasReceipts) {
+          throw new BadRequestException(
+            'Unsafe order edits are blocked after fulfillment movement or receipt posting. Submit a metadata-only update instead.',
+          );
+        }
+      }
+
+      const nextCustomerId =
+        dto.customerId !== undefined
+          ? (await this.resolveCustomer(tx, user.businessId, dto.customerId))?.id ?? null
+          : undefined;
+      const orderLineItemData = dto.items
+        ? await this.resolveOrderLineItemData(tx, user.businessId, dto.items)
+        : null;
+      const nextAmounts = orderLineItemData
+        ? this.computeOrderAmounts(orderLineItemData)
+        : null;
+
+      await tx.salesOrder.update({
+        where: { id: order.id },
+        data: {
+          customerId: nextCustomerId,
+          channel: metadataOnly ? undefined : dto.channel,
+          orderedAt: metadataOnly ? undefined : dto.orderedAt,
+          notes:
+            dto.notes !== undefined
+              ? dto.notes.trim() || null
+              : undefined,
+          subtotal: nextAmounts?.subtotal,
+          discount: nextAmounts?.discount,
+          tax: nextAmounts?.tax,
+          total: nextAmounts?.total,
+          paymentStatus: nextAmounts
+            ? this.computePaymentStatus(
+                this.sumDecimals(order.receipts.map((receipt) => receipt.amountPaid)),
+                nextAmounts.total,
+              )
+            : undefined,
+          items: orderLineItemData
+            ? {
+                deleteMany: {},
+                create: orderLineItemData,
+              }
+            : undefined,
+        },
+        include: salesOrderInclude,
+      });
+
+      const updatedOrder = await tx.salesOrder.findUniqueOrThrow({
+        where: { id: order.id },
+        include: salesOrderInclude,
+      });
+
+      await this.recordOrderEvent(tx, {
+        order: updatedOrder,
+        actorUserId: user.userId,
+        action: SalesOrderControlAction.UPDATED,
+        reasonCode: dto.reasonCode,
+        note: dto.note.trim(),
+        beforeSummary: this.buildOrderSummarySnapshot(order),
+      });
+
+      return this.mapSalesOrder(updatedOrder);
+    });
+  }
+
+  async transitionOrder(user: AuthUser, orderId: string, dto: TransitionOrderDto) {
+    return this.prisma.$transaction(async (tx) => {
+      const order = await this.findOrderOrThrow(tx, user.businessId, orderId);
+      const allowedStatuses = ORDER_TRANSITION_GUARD_MAP[order.orderStatus] ?? [];
+
+      if (dto.reasonCode !== SalesOrderReasonCode.STATUS_TRANSITION) {
+        throw new BadRequestException('Order transitions must use STATUS_TRANSITION as the reason code.');
+      }
+
+      if (dto.nextStatus === SalesOrderStatus.CANCELLED) {
+        throw new BadRequestException('Use the cancel endpoint to cancel an order.');
+      }
+
+      if (dto.nextStatus === SalesOrderStatus.DELIVERED) {
+        throw new BadRequestException('Use the fulfill endpoint to mark an order as delivered.');
+      }
+
+      if (!allowedStatuses.includes(dto.nextStatus)) {
+        const allowedLabel = allowedStatuses.length
+          ? allowedStatuses.join(', ')
+          : 'none';
+        throw new BadRequestException(
+          `Invalid order transition from ${order.orderStatus} to ${dto.nextStatus}. Allowed next statuses: ${allowedLabel}.`,
+        );
+      }
+
+      const transitionedOrder = await tx.salesOrder.update({
+        where: { id: order.id },
+        data: {
+          orderStatus: dto.nextStatus,
+        },
+        include: salesOrderInclude,
+      });
+
+      await this.recordOrderEvent(tx, {
+        order: transitionedOrder,
+        actorUserId: user.userId,
+        action: SalesOrderControlAction.STATUS_TRANSITIONED,
+        reasonCode: dto.reasonCode,
+        note: dto.note.trim(),
+        beforeSummary: this.buildOrderSummarySnapshot(order),
+      });
+
+      return this.mapSalesOrder(transitionedOrder);
+    });
+  }
+
+  async cancelOrder(user: AuthUser, orderId: string, dto: CancelOrderDto) {
+    return this.prisma.$transaction(async (tx) => {
+      const order = await this.findOrderOrThrow(tx, user.businessId, orderId);
+
+      if (!CANCEL_REASON_CODES.has(dto.reasonCode)) {
+        throw new BadRequestException(
+          `Cancel reason code ${dto.reasonCode} is not allowed for order cancellation.`,
+        );
+      }
+
+      if (order.orderStatus === SalesOrderStatus.CANCELLED) {
+        throw new BadRequestException('This order is already cancelled.');
+      }
+
+      if (this.hasFulfillmentMovement(order)) {
+        throw new BadRequestException(
+          'Orders with fulfillment movement cannot be cancelled. Preserve stock truth and use an explicit correction flow instead.',
+        );
+      }
+
+      if (order.receipts.length > 0 && dto.settlementHandled !== true) {
+        throw new BadRequestException(
+          'Receipts already exist for this order. Confirm settlementHandled before cancelling instead of silently voiding the order.',
+        );
+      }
+
+      const cancellationNote = order.receipts.length > 0
+        ? `${dto.note.trim()} (Settlement handled: yes)`
+        : dto.note.trim();
+
+      const cancelledOrder = await tx.salesOrder.update({
+        where: { id: order.id },
+        data: {
+          orderStatus: SalesOrderStatus.CANCELLED,
+        },
+        include: salesOrderInclude,
+      });
+
+      await this.recordOrderEvent(tx, {
+        order: cancelledOrder,
+        actorUserId: user.userId,
+        action: SalesOrderControlAction.CANCELLED,
+        reasonCode: dto.reasonCode,
+        note: cancellationNote,
+        beforeSummary: this.buildOrderSummarySnapshot(order),
+      });
+
+      return this.mapSalesOrder(cancelledOrder);
+    });
+  }
+
+  async reopenOrder(user: AuthUser, orderId: string, dto: ReopenOrderDto) {
+    return this.prisma.$transaction(async (tx) => {
+      const order = await this.findOrderOrThrow(tx, user.businessId, orderId);
+
+      if (!REOPEN_REASON_CODES.has(dto.reasonCode)) {
+        throw new BadRequestException(
+          `Reopen reason code ${dto.reasonCode} is not allowed for order reopening.`,
+        );
+      }
+
+      if (order.orderStatus !== SalesOrderStatus.CANCELLED) {
+        throw new BadRequestException('Only CANCELLED orders can be reopened.');
+      }
+
+      if (this.hasFulfillmentMovement(order) || order.receipts.length > 0) {
+        throw new BadRequestException(
+          'Cancelled orders with fulfillment movement or receipts cannot be reopened safely.',
+        );
+      }
+
+      const reopenedOrder = await tx.salesOrder.update({
+        where: { id: order.id },
+        data: {
+          orderStatus: SalesOrderStatus.NEW,
+        },
+        include: salesOrderInclude,
+      });
+
+      await this.recordOrderEvent(tx, {
+        order: reopenedOrder,
+        actorUserId: user.userId,
+        action: SalesOrderControlAction.REOPENED,
+        reasonCode: dto.reasonCode,
+        note: dto.note.trim(),
+        beforeSummary: this.buildOrderSummarySnapshot(order),
+      });
+
+      return this.mapSalesOrder(reopenedOrder);
     });
   }
 
@@ -350,6 +549,15 @@ export class OrdersService {
         include: salesOrderInclude,
       });
 
+      await this.recordOrderEvent(tx, {
+        order: fulfilledOrder,
+        actorUserId: user.userId,
+        action: SalesOrderControlAction.FULFILLED,
+        reasonCode: SalesOrderReasonCode.FULFILLMENT_POSTED,
+        note: dto.notes?.trim() ?? null,
+        beforeSummary: this.buildOrderSummarySnapshot(order),
+      });
+
       return this.mapSalesOrder(fulfilledOrder);
     });
   }
@@ -405,7 +613,177 @@ export class OrdersService {
         },
       });
 
+      const orderAfterReceipt = await tx.salesOrder.findUniqueOrThrow({
+        where: { id: order.id },
+        include: salesOrderInclude,
+      });
+
+      await this.recordOrderEvent(tx, {
+        order: orderAfterReceipt,
+        actorUserId: user.userId,
+        action: SalesOrderControlAction.RECEIPT_RECORDED,
+        reasonCode: SalesOrderReasonCode.RECEIPT_RECORDED,
+        note: dto.notes?.trim() ?? null,
+        beforeSummary: this.buildOrderSummarySnapshot(order),
+      });
+
       return this.mapReceipt(receipt, paymentStatus, nextPaidTotal, order.total.minus(nextPaidTotal));
+    });
+  }
+
+  private async resolveOrderLineItemData(
+    db: DbClient,
+    businessId: string,
+    items: CreateOrderDto['items'],
+  ) {
+    const resolvedItems: Array<{ quantity: Prisma.Decimal; menuItem: MenuItem }> = [];
+    for (const item of items) {
+      const menuItem = await this.resolveMenuItemForCreateOrderItem(db, businessId, item);
+
+      resolvedItems.push({
+        quantity: toDecimal(item.quantity)!,
+        menuItem,
+      });
+    }
+
+    const uniqueMenuItemIds = Array.from(new Set(resolvedItems.map((item) => item.menuItem.id)));
+    const activeRecipes = await db.recipe.findMany({
+      where: {
+        businessId,
+        menuItemId: { in: uniqueMenuItemIds },
+        isActive: true,
+        deletedAt: null,
+      },
+      include: {
+        producedInventoryItem: true,
+      },
+    });
+
+    const recipeMap = new Map<string, (typeof activeRecipes)[number]>();
+    for (const recipe of activeRecipes) {
+      if (!recipe.menuItemId) {
+        continue;
+      }
+
+      if (recipeMap.has(recipe.menuItemId)) {
+        throw new ConflictException(
+          'A menu item has multiple active recipes. Resolve recipe activation before creating or updating the order.',
+        );
+      }
+
+      recipeMap.set(recipe.menuItemId, recipe);
+    }
+
+    const orderLineItems: ResolvedCreateOrderItem[] = [];
+    for (const item of resolvedItems) {
+      const recipe = recipeMap.get(item.menuItem.id);
+      const fulfilledInventoryItem = recipe
+        ? recipe.producedInventoryItem
+        : await this.findOrCreateSalesFinishedInventoryItem(db, businessId, item.menuItem);
+
+      if (
+        fulfilledInventoryItem.deletedAt !== null ||
+        !fulfilledInventoryItem.isActive ||
+        fulfilledInventoryItem.itemType !== InventoryItemType.FINISHED_GOOD
+      ) {
+        throw new BadRequestException(
+          `Menu item ${item.menuItem.name} does not resolve to an active finished-good inventory item.`,
+        );
+      }
+
+      orderLineItems.push({
+        quantity: item.quantity,
+        menuItem: item.menuItem,
+        fulfilledInventoryItem,
+      });
+    }
+
+    return orderLineItems.map((item) => {
+      const unitPrice = item.menuItem.defaultPrice;
+      const lineTotal = unitPrice.mul(item.quantity);
+
+      return {
+        menuItemId: item.menuItem.id,
+        fulfilledInventoryItemId: item.fulfilledInventoryItem.id,
+        quantity: item.quantity,
+        unitPrice,
+        lineTotal,
+      };
+    });
+  }
+
+  private computeOrderAmounts(
+    orderLineItemData: Array<{
+      lineTotal: Prisma.Decimal;
+    }>,
+  ) {
+    const subtotal = this.sumDecimals(orderLineItemData.map((item) => item.lineTotal));
+    const discount = new Prisma.Decimal(0);
+    const tax = new Prisma.Decimal(0);
+    const total = subtotal.minus(discount).plus(tax);
+
+    return { subtotal, discount, tax, total };
+  }
+
+  private isMetadataOnlyUpdate(dto: UpdateOrderDto) {
+    return dto.channel === undefined && dto.orderedAt === undefined && dto.items === undefined;
+  }
+
+  private hasFulfillmentMovement(order: SalesOrderWithRelations) {
+    return order.items.some((item) => item.stockMovement !== null);
+  }
+
+  private buildOrderSummarySnapshot(order: SalesOrderWithRelations): Prisma.InputJsonValue {
+    const paidAmount = this.sumDecimals(order.receipts.map((receipt) => receipt.amountPaid));
+
+    return {
+      orderStatus: order.orderStatus,
+      paymentStatus: order.paymentStatus,
+      orderedAt: order.orderedAt.toISOString(),
+      channel: order.channel,
+      customerId: order.customerId,
+      notes: order.notes,
+      subtotal: order.subtotal.toString(),
+      total: order.total.toString(),
+      paidAmount: paidAmount.toString(),
+      receiptCount: order.receipts.length,
+      fulfillmentPosted: this.hasFulfillmentMovement(order),
+      items: order.items.map((item) => ({
+        salesOrderItemId: item.id,
+        menuItemId: item.menuItemId,
+        menuItemName: item.menuItem.name,
+        fulfilledInventoryItemId: item.fulfilledInventoryItemId,
+        fulfilledInventoryItemName: item.fulfilledInventoryItem.name,
+        quantity: item.quantity.toString(),
+        unitPrice: item.unitPrice.toString(),
+        lineTotal: item.lineTotal.toString(),
+      })),
+    };
+  }
+
+  private async recordOrderEvent(
+    db: DbClient,
+    input: {
+      order: SalesOrderWithRelations;
+      actorUserId: string;
+      action: SalesOrderControlAction;
+      reasonCode: SalesOrderReasonCode;
+      note: string | null;
+      beforeSummary?: Prisma.InputJsonValue;
+    },
+  ) {
+    await db.salesOrderEvent.create({
+      data: {
+        businessId: input.order.businessId,
+        storeId: input.order.storeId,
+        salesOrderId: input.order.id,
+        actorUserId: input.actorUserId,
+        action: input.action,
+        reasonCode: input.reasonCode,
+        note: input.note,
+        beforeSummary: input.beforeSummary,
+        afterSummary: this.buildOrderSummarySnapshot(input.order),
+      },
     });
   }
 
@@ -635,6 +1013,29 @@ export class OrdersService {
       .filter((value): value is Date => value !== null)
       .sort((left, right) => left.getTime() - right.getTime());
     const fulfilledAt = stockMovementTimes.length > 0 ? stockMovementTimes[stockMovementTimes.length - 1] : null;
+    const hasFulfillmentMovement = this.hasFulfillmentMovement(order);
+    const hasReceipts = order.receipts.length > 0;
+    const editable = EDITABLE_ORDER_STATUSES.has(order.orderStatus) && !hasFulfillmentMovement && !hasReceipts;
+    const validNextStatuses = ORDER_TRANSITION_GUARD_MAP[order.orderStatus] ?? [];
+    const validNextActions = [
+      ...(editable ? ['edit'] : []),
+      ...(order.orderStatus !== SalesOrderStatus.CANCELLED && !hasFulfillmentMovement
+        ? ['cancel']
+        : []),
+      ...(order.orderStatus === SalesOrderStatus.CANCELLED && !hasFulfillmentMovement && !hasReceipts
+        ? ['reopen']
+        : []),
+      ...(order.orderStatus !== SalesOrderStatus.CANCELLED &&
+      order.orderStatus !== SalesOrderStatus.DELIVERED &&
+      !hasFulfillmentMovement
+        ? ['fulfill']
+        : []),
+      ...(order.orderStatus !== SalesOrderStatus.CANCELLED &&
+      paidAmount.lessThan(order.total)
+        ? ['record_payment']
+        : []),
+      ...validNextStatuses.map((status) => `transition:${status}`),
+    ];
 
     return {
       ...order,
@@ -658,6 +1059,33 @@ export class OrdersService {
         fulfilledAt,
         saleMovementCount: order.items.filter((item) => item.stockMovement !== null).length,
       },
+      controlState: {
+        canEdit: editable,
+        canCancel: order.orderStatus !== SalesOrderStatus.CANCELLED && !hasFulfillmentMovement,
+        canReopen:
+          order.orderStatus === SalesOrderStatus.CANCELLED &&
+          !hasFulfillmentMovement &&
+          !hasReceipts,
+        canFulfill:
+          order.orderStatus !== SalesOrderStatus.CANCELLED &&
+          order.orderStatus !== SalesOrderStatus.DELIVERED &&
+          !hasFulfillmentMovement,
+        canRecordPayment:
+          order.orderStatus !== SalesOrderStatus.CANCELLED && paidAmount.lessThan(order.total),
+        settlementRequiredBeforeCancel: hasReceipts,
+        validNextStatuses,
+        validNextActions,
+      },
+      auditTrail: order.events.map((event) => ({
+        id: event.id,
+        action: event.action,
+        reasonCode: event.reasonCode,
+        note: event.note,
+        createdAt: event.createdAt,
+        actorUser: event.actorUser,
+        beforeSummary: event.beforeSummary,
+        afterSummary: event.afterSummary,
+      })),
     };
   }
 

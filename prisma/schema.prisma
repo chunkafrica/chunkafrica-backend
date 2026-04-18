@@ -52,6 +52,30 @@ enum SalesOrderStatus {
   CANCELLED
 }
 
+enum SalesOrderControlAction {
+  CREATED
+  UPDATED
+  STATUS_TRANSITIONED
+  CANCELLED
+  REOPENED
+  FULFILLED
+  RECEIPT_RECORDED
+}
+
+enum SalesOrderReasonCode {
+  ORDER_CREATED
+  METADATA_CORRECTION
+  COMMERCIAL_CORRECTION
+  STATUS_TRANSITION
+  CANCEL_CUSTOMER_REQUEST
+  CANCEL_DUPLICATE
+  CANCEL_OPERATOR_ERROR
+  REOPEN_CUSTOMER_REQUEST
+  REOPEN_OPERATOR_ERROR
+  FULFILLMENT_POSTED
+  RECEIPT_RECORDED
+}
+
 enum PaymentStatus {
   UNPAID
   PARTIALLY_PAID
@@ -114,6 +138,7 @@ model Business {
   productionBatches        ProductionBatch[]
   wasteLogs                WasteLog[]
   salesOrders              SalesOrder[]
+  salesOrderEvents         SalesOrderEvent[]
   invoices                 Invoice[]
   receipts                 Receipt[]
   expenses                 Expense[]
@@ -143,6 +168,7 @@ model Store {
   productionBatches        ProductionBatch[]
   wasteLogs                WasteLog[]
   salesOrders              SalesOrder[]
+  salesOrderEvents         SalesOrderEvent[]
   invoices                 Invoice[]
   receipts                 Receipt[]
   expenses                 Expense[]
@@ -193,6 +219,7 @@ model User {
   productionBatchesCreated        ProductionBatch[]         @relation("ProductionBatchCreatedBy")
   wasteLogsCreated                WasteLog[]                @relation("WasteLogCreatedBy")
   salesOrdersCreated              SalesOrder[]              @relation("SalesOrderCreatedBy")
+  salesOrderEventsCreated         SalesOrderEvent[]         @relation("SalesOrderEventActor")
   invoicesCreated                 Invoice[]                 @relation("InvoiceCreatedBy")
   receiptsCreated                 Receipt[]                 @relation("ReceiptCreatedBy")
   expensesCreated                 Expense[]                 @relation("ExpenseCreatedBy")
@@ -522,6 +549,7 @@ model SalesOrder {
   customer      Customer?        @relation(fields: [customerId], references: [id], onDelete: SetNull)
   createdByUser User             @relation("SalesOrderCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
   items         SalesOrderItem[]
+  events        SalesOrderEvent[]
   invoice       Invoice?
   receipts      Receipt[]
 
@@ -532,6 +560,30 @@ model SalesOrder {
   @@index([orderStatus])
   @@index([paymentStatus])
   @@index([createdByUserId])
+}
+
+model SalesOrderEvent {
+  id              String                  @id @default(uuid()) @db.Uuid
+  businessId      String                  @db.Uuid
+  storeId         String                  @db.Uuid
+  salesOrderId    String                  @db.Uuid
+  actorUserId     String                  @db.Uuid
+  action          SalesOrderControlAction
+  reasonCode      SalesOrderReasonCode
+  note            String?                 @db.Text
+  beforeSummary   Json?
+  afterSummary    Json?
+  createdAt       DateTime                @default(now())
+
+  business     Business   @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  store        Store      @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  salesOrder   SalesOrder @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+  actorUser    User       @relation("SalesOrderEventActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+
+  @@index([businessId, storeId, createdAt])
+  @@index([salesOrderId, createdAt])
+  @@index([actorUserId])
+  @@index([reasonCode])
 }
 
 model SalesOrderItem {
