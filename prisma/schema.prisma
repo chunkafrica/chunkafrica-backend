@@ -92,7 +92,16 @@ enum ProductionBatchStatus {
 
 enum ReconciliationStatus {
   DRAFT
+  READY
   POSTED
+}
+
+enum InventoryAdjustmentReasonCode {
+  COUNT_VARIANCE
+  MISRECEIPT
+  DAMAGE_FOUND
+  OPENING_BALANCE_FIX
+  UOM_FIX
 }
 
 enum InvoiceStatus {
@@ -224,6 +233,7 @@ model User {
   receiptsCreated                 Receipt[]                 @relation("ReceiptCreatedBy")
   expensesCreated                 Expense[]                 @relation("ExpenseCreatedBy")
   inventoryReconciliationsCreated InventoryReconciliation[] @relation("InventoryReconciliationCreatedBy")
+  inventoryReconciliationsLastEdited InventoryReconciliation[] @relation("InventoryReconciliationLastEditedBy")
   stockMovementsCreated           StockMovement[]           @relation("StockMovementCreatedBy")
 
   @@unique([businessId, email])
@@ -372,6 +382,8 @@ model StockInRecord {
   supplier      Supplier?     @relation(fields: [supplierId], references: [id], onDelete: SetNull)
   createdByUser User          @relation("StockInRecordCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
   items         StockInItem[]
+  correctionReconciliations InventoryReconciliation[]
+  correctionStockMovements  StockMovement[] @relation("StockMovementSourceStockInRecord")
 
   @@index([businessId, storeId, receivedAt])
   @@index([supplierId])
@@ -693,9 +705,12 @@ model InventoryReconciliation {
   businessId      String               @db.Uuid
   storeId         String               @db.Uuid
   createdByUserId String               @db.Uuid
+  lastEditedByUserId String?           @db.Uuid
   status          ReconciliationStatus @default(DRAFT)
   startedAt       DateTime
   postedAt        DateTime?
+  sourceStockInRecordId String?        @db.Uuid
+  correctionIntent String?             @db.VarChar(120)
   notes           String?              @db.Text
   createdAt       DateTime             @default(now())
   updatedAt       DateTime             @updatedAt
@@ -704,11 +719,15 @@ model InventoryReconciliation {
   business      Business             @relation(fields: [businessId], references: [id], onDelete: Restrict)
   store         Store                @relation(fields: [storeId], references: [id], onDelete: Restrict)
   createdByUser User                 @relation("InventoryReconciliationCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  lastEditedByUser User?             @relation("InventoryReconciliationLastEditedBy", fields: [lastEditedByUserId], references: [id], onDelete: SetNull)
+  sourceStockInRecord StockInRecord? @relation(fields: [sourceStockInRecordId], references: [id], onDelete: SetNull)
   items         ReconciliationItem[]
 
   @@index([businessId, storeId, startedAt])
   @@index([status])
   @@index([createdByUserId])
+  @@index([lastEditedByUserId])
+  @@index([sourceStockInRecordId])
 }
 
 model ReconciliationItem {
@@ -718,6 +737,8 @@ model ReconciliationItem {
   expectedQuantity          Decimal  @db.Decimal(18,4)
   actualQuantity            Decimal  @db.Decimal(18,4)
   varianceQuantity          Decimal  @db.Decimal(18,4)
+  reasonCode                InventoryAdjustmentReasonCode?
+  note                      String?  @db.Text
   createdAt                 DateTime @default(now())
   updatedAt                 DateTime @updatedAt
 
@@ -737,10 +758,12 @@ model StockMovement {
   createdByUserId             String            @db.Uuid
   movementType                StockMovementType
   quantityChange              Decimal           @db.Decimal(18,4)
+  adjustmentReasonCode        InventoryAdjustmentReasonCode?
   unitCostSnapshot            Decimal?          @db.Decimal(18,4)
   totalCostSnapshot           Decimal?          @db.Decimal(18,4)
   occurredAt                  DateTime
   notes                       String?           @db.Text
+  sourceStockInRecordId       String?           @db.Uuid
   stockInItemId               String?           @unique @db.Uuid
   productionBatchIngredientId String?           @unique @db.Uuid
   productionBatchId           String?           @unique @db.Uuid
@@ -763,6 +786,7 @@ model StockMovement {
   wasteLog                  WasteLog?                  @relation("WasteLogMovement", fields: [wasteLogId], references: [id], onDelete: Restrict)
   reconciliationItem        ReconciliationItem?        @relation("ReconciliationItemMovement", fields: [reconciliationItemId], references: [id], onDelete: Restrict)
   salesOrderItem            SalesOrderItem?            @relation("SalesOrderItemMovement", fields: [salesOrderItemId], references: [id], onDelete: Restrict)
+  sourceStockInRecord       StockInRecord?             @relation("StockMovementSourceStockInRecord", fields: [sourceStockInRecordId], references: [id], onDelete: SetNull)
   sourceStockMovement       StockMovement?             @relation("StockMovementLineage", fields: [sourceStockMovementId], references: [id], onDelete: SetNull)
   consumedByMovements       StockMovement[]            @relation("StockMovementLineage")
 
@@ -770,6 +794,7 @@ model StockMovement {
   @@index([inventoryItemId, occurredAt])
   @@index([businessId, movementType, occurredAt])
   @@index([createdByUserId])
+  @@index([sourceStockInRecordId])
   @@index([sourceStockMovementId])
 }
 

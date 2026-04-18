@@ -3,12 +3,19 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { InventoryItem, Prisma, ReconciliationStatus, StockMovementType, Store } from '@prisma/client';
+import {
+  InventoryItem,
+  Prisma,
+  ReconciliationStatus,
+  StockMovementType,
+  Store,
+} from '@prisma/client';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { toDecimal } from '../../common/utils/decimal.util';
 import { CreateReconciliationDto } from './dto/create-reconciliation.dto';
 import { ListReconciliationsQueryDto } from './dto/list-reconciliations-query.dto';
+import { MarkReconciliationReadyDto } from './dto/mark-reconciliation-ready.dto';
 import { UpdateReconciliationDto } from './dto/update-reconciliation.dto';
 import { UpsertReconciliationItemsDto } from './dto/upsert-reconciliation-items.dto';
 
@@ -19,6 +26,20 @@ const reconciliationInclude = {
       id: true,
       fullName: true,
       email: true,
+    },
+  },
+  lastEditedByUser: {
+    select: {
+      id: true,
+      fullName: true,
+      email: true,
+    },
+  },
+  sourceStockInRecord: {
+    select: {
+      id: true,
+      receivedAt: true,
+      externalReference: true,
     },
   },
   items: {
@@ -37,6 +58,13 @@ type ReconciliationWithRelations = Prisma.InventoryReconciliationGetPayload<{
 }>;
 const reconciliationListInclude = {
   createdByUser: {
+    select: {
+      id: true,
+      fullName: true,
+      email: true,
+    },
+  },
+  lastEditedByUser: {
     select: {
       id: true,
       fullName: true,
@@ -103,14 +131,23 @@ export class ReconciliationsService {
     dto: CreateReconciliationDto,
   ) {
     await this.assertStoreAccess(this.prisma, user.businessId, storeId);
+    await this.assertSourceStockInRecord(
+      this.prisma,
+      user.businessId,
+      storeId,
+      dto.sourceStockInRecordId,
+    );
 
     return this.prisma.inventoryReconciliation.create({
       data: {
         businessId: user.businessId,
         storeId,
         createdByUserId: user.userId,
+        lastEditedByUserId: user.userId,
         status: ReconciliationStatus.DRAFT,
         startedAt: dto.startedAt,
+        sourceStockInRecordId: dto.sourceStockInRecordId,
+        correctionIntent: dto.correctionIntent?.trim(),
         notes: dto.notes?.trim(),
       },
       include: reconciliationInclude,
@@ -131,12 +168,14 @@ export class ReconciliationsService {
       storeId,
       reconciliationId,
     );
-    this.assertDraft(reconciliation.status);
+    this.assertEditableDraft(reconciliation.status);
 
     return this.prisma.inventoryReconciliation.update({
       where: { id: reconciliation.id },
       data: {
+        status: ReconciliationStatus.DRAFT,
         startedAt: dto.startedAt,
+        lastEditedByUserId: user.userId,
         notes: dto.notes?.trim(),
       },
       include: reconciliationInclude,
@@ -163,7 +202,7 @@ export class ReconciliationsService {
         storeId,
         reconciliationId,
       );
-      this.assertDraft(reconciliation.status);
+      this.assertEditableDraft(reconciliation.status);
 
       const inventoryItems = await this.findInventoryItemsOrThrow(
         tx,
@@ -192,17 +231,66 @@ export class ReconciliationsService {
             expectedQuantity: new Prisma.Decimal(0),
             actualQuantity: toDecimal(item.actualQuantity)!,
             varianceQuantity: new Prisma.Decimal(0),
+            reasonCode: item.reasonCode,
+            note: item.note?.trim(),
           },
           update: {
             actualQuantity: toDecimal(item.actualQuantity)!,
             expectedQuantity: new Prisma.Decimal(0),
             varianceQuantity: new Prisma.Decimal(0),
+            reasonCode: item.reasonCode,
+            note: item.note?.trim(),
           },
         });
       }
 
+      await tx.inventoryReconciliation.update({
+        where: { id: reconciliation.id },
+        data: {
+          status: ReconciliationStatus.DRAFT,
+          lastEditedByUserId: user.userId,
+        },
+      });
+
       return tx.inventoryReconciliation.findUniqueOrThrow({
         where: { id: reconciliation.id },
+        include: reconciliationInclude,
+      });
+    });
+  }
+
+  async markReady(
+    user: AuthUser,
+    storeId: string,
+    reconciliationId: string,
+    dto: MarkReconciliationReadyDto,
+  ) {
+    await this.assertStoreAccess(this.prisma, user.businessId, storeId);
+
+    return this.prisma.$transaction(async (tx) => {
+      const reconciliation = await this.findReconciliationOrThrow(
+        tx,
+        user.businessId,
+        storeId,
+        reconciliationId,
+      );
+      this.assertEditableDraft(reconciliation.status);
+
+      if (reconciliation.items.length === 0) {
+        throw new BadRequestException('Add at least one counted line before marking a reconciliation ready.');
+      }
+
+      const nextNotes = [reconciliation.notes?.trim(), dto.note?.trim()]
+        .filter((value): value is string => Boolean(value))
+        .join('\n');
+
+      return tx.inventoryReconciliation.update({
+        where: { id: reconciliation.id },
+        data: {
+          status: ReconciliationStatus.READY,
+          lastEditedByUserId: user.userId,
+          notes: nextNotes || null,
+        },
         include: reconciliationInclude,
       });
     });
@@ -218,7 +306,9 @@ export class ReconciliationsService {
         storeId,
         reconciliationId,
       );
-      this.assertDraft(reconciliation.status);
+      if (reconciliation.status !== ReconciliationStatus.READY) {
+        throw new BadRequestException('Only READY reconciliation sessions can be posted. Mark the draft ready after review first.');
+      }
 
       const inventoryItemIds = reconciliation.items.map((item) => item.inventoryItemId);
       const groupedExpected = inventoryItemIds.length
@@ -247,6 +337,12 @@ export class ReconciliationsService {
         const expectedQuantity = expectedMap.get(item.inventoryItemId) ?? new Prisma.Decimal(0);
         const varianceQuantity = item.actualQuantity.minus(expectedQuantity);
 
+        if (!varianceQuantity.equals(0) && !item.reasonCode) {
+          throw new BadRequestException(
+            `Add a variance reason code before posting ${item.inventoryItem.name}.`,
+          );
+        }
+
         await tx.reconciliationItem.update({
           where: { id: item.id },
           data: {
@@ -264,8 +360,12 @@ export class ReconciliationsService {
               createdByUserId: user.userId,
               movementType: StockMovementType.INVENTORY_ADJUSTMENT,
               quantityChange: varianceQuantity,
+              adjustmentReasonCode: item.reasonCode ?? undefined,
               occurredAt: reconciliation.startedAt,
-              notes: `Inventory reconciliation adjustment for session ${reconciliation.id}`,
+              notes: item.note?.trim()
+                ? `Inventory reconciliation adjustment for session ${reconciliation.id}. ${item.note.trim()}`
+                : `Inventory reconciliation adjustment for session ${reconciliation.id}`,
+              sourceStockInRecordId: reconciliation.sourceStockInRecordId,
               reconciliationItemId: item.id,
             },
           });
@@ -277,6 +377,7 @@ export class ReconciliationsService {
         data: {
           status: ReconciliationStatus.POSTED,
           postedAt: new Date(),
+          lastEditedByUserId: user.userId,
         },
       });
 
@@ -346,9 +447,37 @@ export class ReconciliationsService {
     return inventoryItems;
   }
 
-  private assertDraft(status: ReconciliationStatus) {
-    if (status !== ReconciliationStatus.DRAFT) {
-      throw new BadRequestException('Only DRAFT reconciliation sessions can be modified.');
+  private async assertSourceStockInRecord(
+    db: DbClient,
+    businessId: string,
+    storeId: string,
+    sourceStockInRecordId?: string,
+  ) {
+    if (!sourceStockInRecordId) {
+      return null;
+    }
+
+    const stockInRecord = await db.stockInRecord.findFirst({
+      where: {
+        id: sourceStockInRecordId,
+        businessId,
+        storeId,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (!stockInRecord) {
+      throw new NotFoundException('Source stock-in record not found for this store.');
+    }
+
+    return stockInRecord;
+  }
+
+  private assertEditableDraft(status: ReconciliationStatus) {
+    if (status !== ReconciliationStatus.DRAFT && status !== ReconciliationStatus.READY) {
+      throw new BadRequestException('Only DRAFT or READY reconciliation sessions can be modified.');
     }
   }
 
@@ -374,6 +503,7 @@ export class ReconciliationsService {
       createdAt: reconciliation.createdAt,
       updatedAt: reconciliation.updatedAt,
       createdByUser: reconciliation.createdByUser,
+      lastEditedByUser: reconciliation.lastEditedByUser,
       _count: reconciliation._count,
       varianceSummary: {
         recordedItems: reconciliation.items.length,

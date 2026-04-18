@@ -17,6 +17,7 @@ import { RolesGuard } from '../../common/auth/roles.guard';
 import { UserContextGuard } from '../../common/auth/user-context.guard';
 import { CreateReconciliationDto } from './dto/create-reconciliation.dto';
 import { ListReconciliationsQueryDto } from './dto/list-reconciliations-query.dto';
+import { MarkReconciliationReadyDto } from './dto/mark-reconciliation-ready.dto';
 import { UpdateReconciliationDto } from './dto/update-reconciliation.dto';
 import { UpsertReconciliationItemsDto } from './dto/upsert-reconciliation-items.dto';
 import { ReconciliationsService } from './reconciliations.service';
@@ -76,6 +77,17 @@ export class ReconciliationsController {
     @Body() dto: UpsertReconciliationItemsDto,
   ) {
     return this.reconciliationsService.upsertReconciliationItems(user, storeId, reconciliationId, dto);
+  }
+
+  @Post(':reconciliationId/ready')
+  @Roles('OWNER', 'ADMIN', 'INVENTORY_MANAGER', 'FINANCE')
+  markReady(
+    @CurrentUser() user: AuthUser,
+    @Param('storeId', new ParseUUIDPipe()) storeId: string,
+    @Param('reconciliationId', new ParseUUIDPipe()) reconciliationId: string,
+    @Body() dto: MarkReconciliationReadyDto,
+  ) {
+    return this.reconciliationsService.markReady(user, storeId, reconciliationId, dto);
   }
 
   @Post(':reconciliationId/post')
