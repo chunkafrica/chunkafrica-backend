@@ -327,7 +327,6 @@ model InventoryItem {
   productionBatchIngredients ProductionBatchIngredient[] @relation("ProductionBatchIngredientInventoryItem")
   producedBatches          ProductionBatch[]           @relation("ProductionBatchOutputInventoryItem")
   wasteLogs                WasteLog[]
-  wasteLogEvents           WasteLogEvent[]
   salesOrderItems          SalesOrderItem[]            @relation("SalesOrderItemFulfilledInventoryItem")
   reconciliationItems      ReconciliationItem[]
 
