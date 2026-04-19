@@ -120,6 +120,18 @@ enum InventoryAdjustmentReasonCode {
   UOM_FIX
 }
 
+enum WasteLogEffectiveState {
+  POSTED
+  VOIDED
+  REVERSED
+}
+
+enum WasteLogEventAction {
+  CREATED
+  REVERSED
+  VOIDED
+}
+
 enum InvoiceStatus {
   DRAFT
   ISSUED
@@ -164,6 +176,7 @@ model Business {
   productionBatchCorrections ProductionBatchCorrection[]
   productionBatchEvents    ProductionBatchEvent[]
   wasteLogs                WasteLog[]
+  wasteLogEvents           WasteLogEvent[]
   salesOrders              SalesOrder[]
   salesOrderEvents         SalesOrderEvent[]
   invoices                 Invoice[]
@@ -196,6 +209,7 @@ model Store {
   productionBatchCorrections ProductionBatchCorrection[]
   productionBatchEvents    ProductionBatchEvent[]
   wasteLogs                WasteLog[]
+  wasteLogEvents           WasteLogEvent[]
   salesOrders              SalesOrder[]
   salesOrderEvents         SalesOrderEvent[]
   invoices                 Invoice[]
@@ -249,6 +263,7 @@ model User {
   productionBatchCorrectionsCreated ProductionBatchCorrection[] @relation("ProductionBatchCorrectionActor")
   productionBatchEventsCreated    ProductionBatchEvent[]    @relation("ProductionBatchEventActor")
   wasteLogsCreated                WasteLog[]                @relation("WasteLogCreatedBy")
+  wasteLogEventsCreated           WasteLogEvent[]           @relation("WasteLogEventActor")
   salesOrdersCreated              SalesOrder[]              @relation("SalesOrderCreatedBy")
   salesOrderEventsCreated         SalesOrderEvent[]         @relation("SalesOrderEventActor")
   invoicesCreated                 Invoice[]                 @relation("InvoiceCreatedBy")
@@ -312,6 +327,7 @@ model InventoryItem {
   productionBatchIngredients ProductionBatchIngredient[] @relation("ProductionBatchIngredientInventoryItem")
   producedBatches          ProductionBatch[]           @relation("ProductionBatchOutputInventoryItem")
   wasteLogs                WasteLog[]
+  wasteLogEvents           WasteLogEvent[]
   salesOrderItems          SalesOrderItem[]            @relation("SalesOrderItemFulfilledInventoryItem")
   reconciliationItems      ReconciliationItem[]
 
@@ -575,10 +591,12 @@ model WasteLog {
   inventoryItemId    String   @db.Uuid
   wasteCategoryId    String   @db.Uuid
   createdByUserId    String   @db.Uuid
+  effectiveState     WasteLogEffectiveState @default(POSTED)
   quantity           Decimal  @db.Decimal(18,4)
   occurredAt         DateTime
   note               String?  @db.Text
   costAtLossSnapshot Decimal? @db.Decimal(18,4)
+  lastCorrectionAt   DateTime?
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
@@ -588,11 +606,37 @@ model WasteLog {
   wasteCategory WasteCategory  @relation(fields: [wasteCategoryId], references: [id], onDelete: Restrict)
   createdByUser User           @relation("WasteLogCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
   stockMovement StockMovement? @relation("WasteLogMovement")
+  events        WasteLogEvent[]
 
   @@index([businessId, storeId, occurredAt])
   @@index([inventoryItemId])
   @@index([wasteCategoryId])
   @@index([createdByUserId])
+  @@index([effectiveState])
+}
+
+model WasteLogEvent {
+  id                  String             @id @default(uuid()) @db.Uuid
+  businessId          String             @db.Uuid
+  storeId             String             @db.Uuid
+  wasteLogId          String             @db.Uuid
+  actorUserId         String             @db.Uuid
+  action              WasteLogEventAction
+  reason              String
+  note                String?            @db.Text
+  linkedStockMovementId String?          @db.Uuid
+  createdAt           DateTime           @default(now())
+
+  business           Business      @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  store              Store         @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  wasteLog           WasteLog      @relation(fields: [wasteLogId], references: [id], onDelete: Restrict)
+  actorUser          User          @relation("WasteLogEventActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+  linkedStockMovement StockMovement? @relation("WasteLogEventLinkedMovement", fields: [linkedStockMovementId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, storeId, createdAt])
+  @@index([wasteLogId, createdAt])
+  @@index([actorUserId])
+  @@index([linkedStockMovementId])
 }
 
 model Customer {
@@ -870,6 +914,7 @@ model StockMovement {
   sourceStockInRecord       StockInRecord?             @relation("StockMovementSourceStockInRecord", fields: [sourceStockInRecordId], references: [id], onDelete: SetNull)
   sourceStockMovement       StockMovement?             @relation("StockMovementLineage", fields: [sourceStockMovementId], references: [id], onDelete: SetNull)
   consumedByMovements       StockMovement[]            @relation("StockMovementLineage")
+  wasteLogEvents            WasteLogEvent[]            @relation("WasteLogEventLinkedMovement")
 
   @@index([businessId, storeId, occurredAt])
   @@index([inventoryItemId, occurredAt])
