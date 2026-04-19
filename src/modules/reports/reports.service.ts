@@ -89,27 +89,19 @@ export class ReportsService {
             businessId: user.businessId,
             storeId,
             batchDate: { gte: range.from, lte: range.to },
-            status: {
-              in: [
-                ProductionBatchStatus.COMPLETED,
-                ProductionBatchStatus.CORRECTION_POSTED,
-              ],
-            },
+            status: ProductionBatchStatus.COMPLETED,
           },
           select: {
             id: true,
             batchNumber: true,
             plannedOutputQuantity: true,
             actualOutputQuantity: true,
-            effectiveActualOutputQuantity: true,
             outputVarianceQuantity: true,
-            effectiveOutputVarianceQuantity: true,
             expectedUnitCost: true,
             actualUnitCost: true,
             expectedTotalCost: true,
             actualTotalCost: true,
             varianceReasonCode: true,
-            effectiveVarianceReasonCode: true,
             menuItem: {
               select: {
                 name: true,
@@ -182,12 +174,9 @@ export class ReportsService {
     const abnormalRuns = productionBatchesForIntelligence.filter((batch) => {
       const expectedOutputQuantity =
         batch.plannedOutputQuantity ?? new Prisma.Decimal(0);
-      const effectiveActualOutputQuantity =
-        batch.effectiveActualOutputQuantity ?? batch.actualOutputQuantity;
       const outputVarianceQuantity =
-        batch.effectiveOutputVarianceQuantity ??
         batch.outputVarianceQuantity ??
-        effectiveActualOutputQuantity.minus(expectedOutputQuantity);
+        batch.actualOutputQuantity.minus(expectedOutputQuantity);
       const expectedUnitCost = batch.expectedUnitCost ?? new Prisma.Decimal(0);
       const actualUnitCost = batch.actualUnitCost ?? new Prisma.Decimal(0);
 
